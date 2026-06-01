@@ -1,0 +1,89 @@
+{
+  "repos": [
+    {
+      "url": "https://github.com/tiangolo/fastapi",
+      "description": "FastAPI – modern Python web APIs",
+      "tags": ["python", "api", "backend"]
+    },
+    {
+      "url": "https://github.com/encode/starlette",
+      "description": "Starlette – async Python web framework",
+      "tags": ["python", "async", "backend"]
+    },
+    {
+      "url": "https://github.com/pallets/flask",
+      "description": "Flask – lightweight Python web framework",
+      "tags": ["python", "web", "backend"]
+    },
+    {
+      "url": "https://github.com/django/django",
+      "description": "Django – full-stack Python web framework",
+      "tags": ["python", "fullstack", "backend"]
+    },
+    {
+      "url": "https://github.com/sqlalchemy/sqlalchemy",
+      "description": "SQLAlchemy – Python SQL toolkit and ORM",
+      "tags": ["python", "database", "orm"]
+    },
+    {
+      "url": "https://github.com/pydantic/pydantic",
+      "description": "Pydantic – data validation using Python type hints",
+      "tags": ["python", "validation", "types"]
+    },
+    {
+      "url": "https://github.com/vercel/next.js",
+      "description": "Next.js – React framework for production",
+      "tags": ["javascript", "react", "fullstack"]
+    },
+    {
+      "url": "https://github.com/facebook/react",
+      "description": "React – UI component library",
+      "tags": ["javascript", "react", "frontend"]
+    },
+    {
+      "url": "https://github.com/vitejs/vite",
+      "description": "Vite – fast frontend build tool",
+      "tags": ["javascript", "build", "frontend"]
+    },
+    {
+      "url": "https://github.com/shadcn-ui/ui",
+      "description": "shadcn/ui – beautifully designed React components",
+      "tags": ["react", "ui", "components"]
+    },
+    {
+      "url": "https://github.com/tailwindlabs/tailwindcss",
+      "description": "Tailwind CSS – utility-first CSS framework",
+      "tags": ["css", "styling", "frontend"]
+    },
+    {
+      "url": "https://github.com/prisma/prisma",
+      "description": "Prisma – next-gen Node.js ORM",
+      "tags": ["javascript", "database", "orm"]
+    },
+    {
+      "url": "https://github.com/supabase/supabase",
+      "description": "Supabase – open source Firebase alternative",
+      "tags": ["backend", "database", "auth"]
+    },
+    {
+      "url": "https://github.com/trpc/trpc",
+      "description": "tRPC – end-to-end typesafe APIs",
+      "tags": ["typescript", "api", "fullstack"]
+    },
+    {
+      "url": "https://github.com/pmndrs/zustand",
+      "description": "Zustand – lightweight React state management",
+      "tags": ["react", "state", "frontend"]
+    },
+    {
+      "url": "https://github.com/tiangolo/typer",
+      "description": "Typer – modern Python CLI framework on top of click",
+      "tags": ["python", "cli"]
+    },
+    {
+      "url": "https://github.com/Textualize/rich",
+      "description": "Rich – beautiful terminal output: colour, progress bars, tables",
+      "tags": ["python", "cli", "terminal"]
+    }
+  ]
+}
