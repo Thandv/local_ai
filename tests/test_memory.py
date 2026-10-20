@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
-from local_ai.agents.shared.memory import MIN_SOURCE_LOC, Project
+from local_ai.agents.shared.memory import MIN_SOURCE_FILES, MIN_SOURCE_LOC, Project
 
 
 def _write_lines(path: Path, n: int) -> None:
@@ -37,7 +37,8 @@ class ComputeFinalSuccessTests(support.GuardedTestCase):
         _write_lines(self.out / "b.py", 40)
         passed, reason = self.project.compute_final_success()
         self.assertFalse(passed)
-        self.assertIn("PLAN.md", reason)
+        self.assertEqual(
+            reason, "PLAN.md was not produced — Architect stage failed or wrote no plan")
 
     def test_markdown_and_tooling_dirs_do_not_count(self) -> None:
         (self.out / "PLAN.md").write_text("# plan\n", encoding="utf-8")
@@ -48,6 +49,26 @@ class ComputeFinalSuccessTests(support.GuardedTestCase):
         passed, reason = self.project.compute_final_success()
         self.assertFalse(passed)
         self.assertEqual(reason, "only 1 source file(s) — need at least 2")
+
+    def test_thresholds_are_two_files_and_thirty_lines(self) -> None:
+        self.assertEqual((MIN_SOURCE_FILES, MIN_SOURCE_LOC), (2, 30))
+
+    def test_every_tooling_dir_is_skipped_even_when_nested(self) -> None:
+        (self.out / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+        _write_lines(self.out / "app.py", 40)
+        for d in (".git", "venv", ".venv", "node_modules", "__pycache__",
+                  ".pytest_cache", "dist", "build"):
+            _write_lines(self.out / "src" / d / "x.py", 40)
+        self.assertEqual(
+            self.project.compute_final_success(),
+            (False, "only 1 source file(s) — need at least 2"),
+        )
+
+    def test_extension_match_is_case_insensitive(self) -> None:
+        (self.out / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+        _write_lines(self.out / "APP.PY", 20)
+        _write_lines(self.out / "Index.HTML", 20)
+        self.assertEqual(self.project.compute_final_success(), (True, ""))
 
     def test_fails_below_min_loc(self) -> None:
         (self.out / "PLAN.md").write_text("# plan\n", encoding="utf-8")
