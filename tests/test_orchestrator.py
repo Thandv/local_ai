@@ -55,6 +55,7 @@ class ResumeTests(support.GuardedTestCase):
         self._tmp = tempfile.TemporaryDirectory()
         self.out = Path(self._tmp.name)
         self.called: list[str] = []
+        self.failing: set[str] = set()
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -63,6 +64,8 @@ class ResumeTests(support.GuardedTestCase):
     def _fake(self, name: str) -> Callable[[Project], Project]:
         def stage(project: Project) -> Project:
             self.called.append(name)
+            if name in self.failing:
+                raise RuntimeError(f"invented {name} failure")
             return project
         return stage
 
@@ -107,6 +110,26 @@ class ResumeTests(support.GuardedTestCase):
 
         self.assertEqual(self.called, ["reviewer", "packager"])
         self.assertEqual(logged, [STAGES[:10], STAGES])
+
+    def test_failed_stage_is_contained_and_not_checkpointed(self) -> None:
+        (self.out / "BUILD_LOG.json").write_text(json.dumps({
+            "instruction": "invented recipe planner",
+            "completed_stages": STAGES[:8],
+        }), encoding="utf-8")
+        self.failing = {"devops"}
+        saved: list[str] = []
+        real_save = orchestrator._save_checkpoint
+
+        def spy(project: Project, stage: str) -> None:
+            saved.append(stage)
+            real_save(project, stage)
+
+        with mock.patch.object(orchestrator, "_save_checkpoint", spy), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self._run_resume()
+
+        self.assertEqual(self.called, ["devops", "reviewer", "packager"])
+        self.assertEqual(saved, ["reviewer", "packager"])
 
     def test_explicit_instruction_overrides_logged_one(self) -> None:
         (self.out / "BUILD_LOG.json").write_text(json.dumps({
