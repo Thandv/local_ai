@@ -12,6 +12,10 @@ from local_ai import build_cli, indexer, vibe
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Working, build and test dirs that are never part of the shipped package.
+NON_PACKAGE_DIRS = {"tests", "scripts", "output", "build", "dist", "venv",
+                    "node_modules", "__pycache__"}
+
 with (REPO_ROOT / "pyproject.toml").open("rb") as _f:
     PYPROJECT = tomllib.load(_f)
 
@@ -31,7 +35,8 @@ class PackagingConfigTests(support.GuardedTestCase):
         on_disk = sorted(
             ".".join(("local_ai",) + p.parent.relative_to(REPO_ROOT).parts)
             for p in REPO_ROOT.rglob("__init__.py")
-            if not {".git", ".venv", "build"} & set(p.relative_to(REPO_ROOT).parts)
+            if not any(part.startswith(".") or part in NON_PACKAGE_DIRS
+                       for part in p.relative_to(REPO_ROOT).parts)
         )
         cfg = PYPROJECT["tool"]["setuptools"]
         self.assertEqual(sorted(cfg["packages"]), on_disk)

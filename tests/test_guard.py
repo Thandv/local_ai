@@ -30,22 +30,33 @@ class GuardTests(support.GuardedTestCase):
         self.assertTrue(support.is_installed())
 
     def test_guarded_calls_raise_and_are_recorded_by_name(self) -> None:
-        # Identity is checked above; skip calling anything real if it fails.
-        if not support.is_installed():
-            self.fail("guard not installed; refusing to call real functions")
+        calls = [
+            ("urllib.request.urlopen",
+             lambda: urllib.request.urlopen("http://127.0.0.1:9/")),
+            ("subprocess.run", lambda: subprocess.run(["false"])),
+            ("subprocess.Popen", lambda: subprocess.Popen(["false"])),
+            ("socket.create_connection",
+             lambda: socket.create_connection(("127.0.0.1", 9))),
+        ]
+        live = {
+            "urllib.request.urlopen": urllib.request.urlopen,
+            "subprocess.run": subprocess.run,
+            "subprocess.Popen": subprocess.Popen,
+            "socket.create_connection": socket.create_connection,
+        }
+        # Check every live callable is a stub before calling any of them, so a
+        # broken guard never runs a real process or opens a real connection.
+        unguarded = [n for n, fn in live.items()
+                     if getattr(fn, "guard_name", None) != n]
+        self.assertEqual(unguarded, [], "refusing to call unguarded functions")
         saved = list(support.CALLS)
         try:
             support.CALLS.clear()
-            calls = [
-                lambda: urllib.request.urlopen("http://127.0.0.1:9/"),
-                lambda: subprocess.run(["false"]),
-                lambda: subprocess.Popen(["false"]),
-                lambda: socket.create_connection(("127.0.0.1", 9)),
-            ]
-            for call in calls:
+            for _, call in calls:
                 with self.assertRaises(support.GuardViolation):
                     call()
-            self.assertEqual([c.split(" ", 1)[0] for c in support.CALLS], EXPECTED)
+            self.assertEqual([c.split(" ", 1)[0] for c in support.CALLS],
+                             [name for name, _ in calls])
         finally:
             support.CALLS[:] = saved
 
