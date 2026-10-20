@@ -39,4 +39,4 @@ and no model: `tests/support.py` replaces `urllib.request.urlopen`,
 `subprocess.run`, `subprocess.Popen` and `socket.create_connection` with
 stubs that raise, and every test fails if any of them was called. Tests write
 only to temporary directories. Extra arguments are passed to `unittest`
-(e.g. `bash scripts/test.sh -v`).
+(e.g. `bash scripts/test.sh -v`, or `-k resume` to run matching tests).
