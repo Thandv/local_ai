@@ -60,6 +60,10 @@ def build_index(repos_json: Path = REPOS_JSON, limit: int = 0):
     print("\nYour vibe coder will now search these repos for patterns when you ask it to build something.")
 
 
-if __name__ == "__main__":
+def main() -> None:
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     build_index(limit=limit)
+
+
+if __name__ == "__main__":
+    main()
