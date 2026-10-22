@@ -522,8 +522,10 @@ class RunCommandAllowedTests(SandboxCase):
             with self.subTest(command=command):
                 self.run_mock.reset_mock()
                 tools.run_command(command)
-                self.assertEqual(self.run_argv(), [str(venv / "bin" / "python"), "-m", "pip",
-                                                   "install", "requests"])
+                self.assertEqual(self.run_argv(), [
+                    str(venv / "bin" / "python"), "-I", "-m", "pip", "install", "--isolated",
+                    "--no-input", "--disable-pip-version-check", "--index-url",
+                    "https://pypi.org/simple", "--only-binary=:all:", "requests"])
                 self.assertEqual(self.run_kwargs()["env"]["VIRTUAL_ENV"], str(venv))
 
     def test_python_resolves_through_the_venv_first(self) -> None:

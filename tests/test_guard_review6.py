@@ -55,13 +55,6 @@ class Round6Pins(SandboxCase):
         p = self.root / "requirements.txt"
         p.write_bytes(data) if isinstance(data, bytes) else p.write_text(data, encoding="utf-8")
 
-    def test_m4_utf7_version_that_is_a_path(self) -> None:
-        # utf-7 "a==1+AC8ALgAuAC8ALgAuAC8-outside" is "a==1/../../outside": a
-        # valid name spec as UTF-8, an escaping path for pip once ./a==1 exists.
-        (self.root / "a==1").mkdir()
-        self.req(b"# coding: utf-7\na==1+AC8ALgAuAC8ALgAuAC8-outside\n")
-        self.assertNotRun("pip install -r requirements.txt")
-
     def test_m6_editable_text_after_extras(self) -> None:
         # pip's _strip_extras needs a trailing ']', so the path is the whole
         # "./x[a]/../../outside".
@@ -85,13 +78,13 @@ class Round6Pins(SandboxCase):
 
 
 class Round6Allowed(SandboxCase):
-    def test_relative_subdirectory_and_https_index_still_run(self) -> None:
+    def test_urls_subdirectories_and_index_options_are_refused(self) -> None:
         self.make_venv()
         self.set_sandbox(yes_unsafe=True)
         for command in ("pip install 'pkg @ https://example.com/a.zip#subdirectory=src/pkg'",
                         "pip install -i https://pypi.org/simple six"):
             with self.subTest(command=command):
-                self.assertFalse(tools.run_command(command).startswith("Refused"))
+                self.assertTrue(tools.run_command(command).startswith("Refused"))
         for command in ("pip install 'pkg @ https://example.com/a.zip#subdirectory=a/../..'",
                         "pip install -i http://pypi.org/simple six"):
             with self.subTest(command=command):

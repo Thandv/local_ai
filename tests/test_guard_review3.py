@@ -45,20 +45,6 @@ class ReqFileTests(SandboxCase):
         (self.root / "a" / "b" / "req.txt").write_text("-e ../outside\n", encoding="utf-8")
         self.assertNotRun("pip install -r a/b/req.txt")
 
-    def test_l1_hash_pinned_requirements_with_line_continuations_still_install(self) -> None:
-        (self.root / "requirements.txt").write_text(
-            "requests==2.32.3 \\\n    --hash=sha256:" + "a" * 64 + "\n", encoding="utf-8")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
-
-    def test_l2_ordinary_requirements_install(self) -> None:
-        (self.root / "requirements.txt").write_text(
-            "requests>=2,<3\nflask[async]==3.0 ; python_version >= \"3.9\"\n-e .\n"
-            "# comment\nnumpy  # trailing\n", encoding="utf-8")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
-
-
 class NpmPrefixAliasTests(SandboxCase):
     def test_f4_npm_short_alias_for_prefix_is_hard_refused(self) -> None:
         # npm's shorthand -C expands to --prefix.
@@ -176,14 +162,6 @@ class Round3MutationPins(SandboxCase):
         os.remove(self.root / "requirements.txt")
         os.link(self.outside / "r.txt", self.root / "requirements.txt")  # hard link
         self.assertNotRun("pip install -r requirements.txt")
-
-    def test_ordinary_constraints_and_requirements_still_run(self) -> None:
-        self.make_venv()
-        self.set_sandbox(yes_unsafe=True)
-        self.req("requests>=2\n", "c.txt")
-        self.req("-c c.txt\nflask[async]==3.0 ; python_version >= '3.10'\n-e .\n")
-        tools.run_command("pip install -r requirements.txt")
-        self.run_mock.assert_called_once()
 
     def test_node_and_npm_never_resolve_from_the_build_venv(self) -> None:
         import shutil

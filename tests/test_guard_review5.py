@@ -58,18 +58,6 @@ class ReqFileRound5(SandboxCase):
         self.assertNotRun("pip install -r requirements.txt")
 
     # regressions for ordinary files
-    def test_g_ordinary_lines_still_install(self) -> None:
-        self.req("requests>=2.0 ; python_version < \"3.8\"\n"
-                 "six==1.16.0 \\\n    --hash=sha256:" + "a" * 64 + "\n"
-                 "-e .\n"
-                 "pkg @ https://example.com/pkg-1.0.tar.gz\n"
-                 "git+https://github.com/a/b.git#egg=b\n"
-                 "--index-url https://pypi.org/simple\n"
-                 "x # comment with ${HOME}\n")
-        (self.root / "setup.py").write_text("")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
-
     def test_h_file_url_space_in_path(self) -> None:
         # pip: Link("file:./ok /../../outside") -> <outside>; the checker stops at ' '.
         (self.root / "ok ").mkdir()
@@ -104,9 +92,6 @@ class ReqFileRound5(SandboxCase):
                 self.req(text)
                 self.assertTrue(tools.run_command("pip install -r requirements.txt")
                                 .startswith("Refused:"))
-        self.req("six --config-settings key=value\n./pkg\n")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
 
 
 class PipCommandLineGrammarTests(SandboxCase):
@@ -122,17 +107,3 @@ class PipCommandLineGrammarTests(SandboxCase):
                         "pip install ../outside"):
             with self.subTest(command=command):
                 self.assertNotRun(command)
-
-    def test_ordinary_specs_still_run(self) -> None:
-        self.make_venv()
-        self.set_sandbox(yes_unsafe=True)
-        (self.root / "pkg").mkdir()
-        for command in ("pip install 'flask[async]>=3,<4' requests==2.32.3",
-                        "pip install -e .", "pip install -e '.[dev]'", "pip install ./pkg",
-                        "pip install 'pkg @ https://example.com/p-1.0.tar.gz'",
-                        "pip install git+https://github.com/a/b.git", "pip list",
-                        "pip uninstall -y requests"):
-            with self.subTest(command=command):
-                self.run_mock.reset_mock()
-                result = tools.run_command(command)
-                self.assertFalse(result.startswith("Refused"), result)

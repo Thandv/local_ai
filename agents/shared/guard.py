@@ -16,8 +16,10 @@ Every file a model writes and every command it runs goes through this module:
   a TTY, and is refused when no TTY is attached. Only the person can skip the
   confirmation, with --yes-unsafe on the command line; the model cannot.
 * pip and npm installs never touch the PATH interpreter: pip runs only as the
-  per-build venv's `python -m pip` (ROOT/.venv), npm installs only into a
-  package.json in the working dir, and both always need the confirmation.
+  per-build venv's `python -I -m pip --isolated` (ROOT/.venv) with plain PyPI
+  names as its only model-chosen arguments, in an empty temp dir outside the
+  root; npm installs only into a package.json in the working dir. Both always
+  need the confirmation.
 
 Limit: an allowlisted test runner (pytest, unittest, npm test, node <file>)
 runs model-written code with your user's permissions. The guard decides which
@@ -37,6 +39,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -331,6 +334,7 @@ class _Plan:
     confirm: str = ""     # why it needs the person's confirmation ("" = allowlisted)
     env_extra: tuple = ()
     use_venv: bool = True  # put ROOT/.venv/bin first on the child's PATH
+    pip_cwd: bool = False  # run in a fresh empty temp dir outside the root
 
 
 _SHELL_OPERATOR = re.compile(r"^(\|\|?|&&?|;;?|\d*[<>]{1,2}&?\d*|[<>]\(.*)$")
@@ -705,178 +709,69 @@ def _npm_script_safe(sandbox: Sandbox, cwd: str, name: str) -> tuple[bool, str]:
     return (True, "") if ok else (False, f"script {name!r} runs {body!r}")
 
 
-_PIP_SUBCOMMANDS = {"install", "uninstall", "list", "freeze", "show", "check"}
-_PIP_FLAGS = {"-q", "-qq", "-v", "-U", "--upgrade", "--quiet", "--verbose", "--no-cache-dir",
-              "--pre", "--no-deps", "--no-input", "--disable-pip-version-check",
-              "--prefer-binary", "--require-hashes", "-y", "--yes", "--outdated",
-              "--upgrade-strategy=only-if-needed", "--upgrade-strategy=eager"}
-_PIP_PATH_OPTS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable"}
-_PIP_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--format"}
+# pip never reads a model-written file and never sees an ambiguous argument.
+# The only pip arguments the model chooses are plain PyPI project names
+# (strict PEP 508 subset, below), passed as separate argv items to
+# `python -I -m pip <sub> --isolated ...` with a fixed index, wheels only, and
+# a fresh empty cwd outside the build (pip tries index URLs and requirement
+# strings as paths relative to its cwd first). `pip install -r
+# requirements.txt` is not passed to pip: the guard reads that one file itself
+# and turns it into names, refusing the whole file on any other line.
+_PIP_SUBCOMMANDS = ("install", "uninstall", "list", "freeze", "show", "check")
+_PIP_COMMON = ("--isolated", "--no-input", "--disable-pip-version-check")
+PIP_INDEX_URL = "https://pypi.org/simple"
+_PIP_INSTALL_FIXED = ("--index-url", PIP_INDEX_URL, "--only-binary=:all:")
+_PIP_NAME = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+    r"((==|>=|<=|~=|!=|<|>)[A-Za-z0-9.*+!_-]+(,(==|>=|<=|~=|!=|<|>)[A-Za-z0-9.*+!_-]+)*)?")
+_PIP_COMMENT = re.compile(r" *#[ -~]*")
+REQUIREMENTS_FILE = "requirements.txt"
+_MAX_REQ_BYTES = 1_000_000
+_MAX_PIP_NAMES = 500
 
 
-# pip requirement specs and requirements files are checked against a strict
-# allowlist grammar instead of re-implementing pip's parser: anything that
-# does not match (unusual URL schemes, odd characters in paths, encodings,
-# backslash tricks, ${VAR}) is refused, never interpreted.
-_SAFE_PATH = re.compile(r"(\.|\.\.|[A-Za-z0-9_][A-Za-z0-9_.+-]*)(/(\.|\.\.|[A-Za-z0-9_][A-Za-z0-9_.+-]*))*/?")
-_EXTRAS = r"(\[[A-Za-z0-9_.,-]+\])?"
-_REQ_NAME_SPEC = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS +
-    r"(\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+(\s*,\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+)*)?")
-_REQ_URL = re.compile(r"https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
-_REQ_VCS = re.compile(r"git\+https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
-_REQ_MARKER = re.compile(r"[A-Za-z0-9_.'\"<>=!~ ()-]+")
-_REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
-                "--only-binary", "--no-binary", "--require-hashes", "--hash",
-                "--config-settings"}
-_INDEX_OPTS = {"-i", "--index-url", "--extra-index-url"}
-_HTTPS_URL = re.compile(r"https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
-_REQ_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--no-binary",
-                   "--hash", "--config-settings"}
+def _pip_name(arg: str, what: str) -> str:
+    if not (isinstance(arg, str) and arg.isascii() and _PIP_NAME.fullmatch(arg)):
+        raise Refused(f"{what} {arg!r} is not a plain PyPI name like `name`, `name[extra]` "
+                      "or `name==1.2,<2` (no options, URLs, paths, markers or spaces)")
+    return arg
 
 
-def _check_local_path(sandbox: Sandbox, base: str, path: str, what: str) -> None:
-    if not _SAFE_PATH.fullmatch(path) or not _path_ok(sandbox, base, path):
-        raise Refused(f"{what} {path!r} must be a plain relative path inside the build dir")
-
-
-_SUBDIR = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
-
-
-def _url_ok(url: str, pattern) -> bool:
-    """An allowed URL whose #subdirectory= (pip joins it onto the unpacked
-    dir unchecked) is a plain relative path with no '..', and with no '.' or
-    '..' segment (pip first tries `name @ <url>` as a normpath'd local path)."""
-    if not pattern.fullmatch(url) or re.search(r"(^|/)\.\.?($|[/?#])", url):
-        return False
-    return all(_SUBDIR.fullmatch(v) and ".." not in v.split("/")
-               for v in re.findall(r"[#&]subdirectory=([^&]*)", url))
-
-
-def _check_pip_spec(sandbox: Sandbox, cwd: str, spec: str, *, editable: bool = False) -> None:
-    """One requirement: `name[extras] <specifiers> [; marker]`, `name @ https://...`,
-    `git+https://...` (editable), or a plain relative path inside the build dir.
-    Everything else (file:, git+file:, other schemes, ';' in paths, ...) is refused."""
-    if editable:
-        if _REQ_VCS.fullmatch(spec):
-            if not _url_ok(spec, _REQ_VCS):
-                raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
-            return
-        base, _, extras = spec.partition("[")
-        if extras and not re.fullmatch(r"[A-Za-z0-9_.,-]+\]", extras):
-            raise Refused(f"editable {spec!r} is not a plain path")
-        _check_local_path(sandbox, cwd, base, "editable path")
-        return
-    req, sep, marker = spec.partition("; ")
-    if sep and not _REQ_MARKER.fullmatch(marker.strip()):
-        raise Refused(f"requirement marker {marker!r} is not allowed")
-    req = req.strip()
-    if _REQ_NAME_SPEC.fullmatch(req):
-        return
-    if _REQ_VCS.fullmatch(req):
-        if not _url_ok(req, _REQ_VCS):
-            raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
-        return
-    name, at, url = req.partition(" @ ")
-    if at and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS, name.strip()) \
-            and _REQ_URL.fullmatch(url.strip()):
-        if not _url_ok(url.strip(), _REQ_URL):
-            raise Refused(f"{spec!r}: no '.' or '..' segments, and #subdirectory= "
-                          "must be a plain relative path")
-        return
-    if (req.startswith(".") or "/" in req) and _SAFE_PATH.fullmatch(req):
-        _check_local_path(sandbox, cwd, req, "requirement path")
-        return
-    raise Refused(f"requirement {spec!r} is not a plain name, https URL or path in the build dir")
-
-
-def _read_requirements(sandbox: Sandbox, path: str) -> str:
-    real = os.path.realpath(path)
-    if not is_inside(sandbox, real) or not _single_link_file(path):
-        raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
-    with open(real, "rb") as f:
-        data = f.read(1_000_001)
-    if len(data) > 1_000_000:
-        raise Refused("requirements file is too large")
+def _requirements_names(sandbox: Sandbox, cwd: str) -> list:
+    """The project names in <cwd>/requirements.txt, read by the guard itself.
+    Every line must be blank, a full-line comment or a strict name; any other
+    line refuses the whole file."""
+    path = os.path.join(cwd, REQUIREMENTS_FILE)
+    try:
+        fd = _open_file(sandbox, path, write=False)
+    except FileNotFoundError:
+        raise Refused(f"there is no {REQUIREMENTS_FILE} in {cwd}")
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(_MAX_REQ_BYTES + 1)
+    if len(data) > _MAX_REQ_BYTES:
+        raise Refused(f"{REQUIREMENTS_FILE} is too large")
+    if data.startswith(b"\xef\xbb\xbf"):
+        data = data[3:]
     try:
         text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        raise Refused("requirements file must be plain UTF-8")
-    if text.startswith("﻿") or "\x00" in text:
-        raise Refused("requirements file must be plain UTF-8 (no BOM, no NUL)")
-    if any(re.search(r"coding[:=]", line) for line in text.splitlines()[:2]):
-        raise Refused("requirements file may not declare an encoding")
-    if any(re.search(rb"coding[:=]", line) for line in data.split(b"\n")[:2]):
-        # pip looks for PEP 263 in the first two b"\n" lines, not splitlines()
-        raise Refused("requirements file may not declare an encoding")
-    return text
-
-
-def _join_requirement_lines(text: str) -> list:
-    """Joined logical lines. The only backslash allowed is a single one that
-    ends a line after a space (pip-compile's hash layout)."""
-    lines, current = [], ""
-    for raw in text.splitlines():
-        if re.match(r"\s*#", raw) and raw.rstrip().endswith("\\"):
-            # pip never continues a comment line; the checker must not either
-            raise Refused("a comment line may not end with '\\'")
-        body = raw[:-1] if raw.endswith(" \\") else raw
-        if "\\" in body:
-            raise Refused("requirements files may use '\\' only as ' \\' at a line end")
-        if raw.endswith(" \\"):
-            current += body
+        raise Refused(f"{REQUIREMENTS_FILE} must be plain ASCII")
+    if not text.isascii() or re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text):
+        # no BOMs but a leading UTF-8 one, no \r, \f, \v, NUL, tabs, non-ASCII
+        raise Refused(f"{REQUIREMENTS_FILE} must be plain ASCII with \\n line ends "
+                      "(no CR, tab, form feed or other control characters)")
+    names = []
+    for number, line in enumerate(text.split("\n"), start=1):
+        if not line.strip(" ") or _PIP_COMMENT.fullmatch(line):
             continue
-        current += raw
-        line = re.sub(r"(^|\s)#.*$", "", current).strip()
-        if "${" in line:
-            raise Refused("requirements files may not use ${VAR} expansion")
-        if line:
-            lines.append(line)
-        current = ""
-    if current.strip():
-        raise Refused("requirements file ends with a continuation")
-    return lines
-
-
-def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) -> None:
-    """Every line of a requirements/constraints file must pass the same
-    allowlist (the confirmation prompt shows only `-r <file>`). Nested -r/-c
-    paths are relative to the file; -e and bare paths to the cwd (as in pip)."""
-    if depth > 3:
-        raise Refused("requirements files nest too deeply")
-    text = _read_requirements(sandbox, path)
-    base = os.path.dirname(os.path.realpath(path))
-    for line in _join_requirement_lines(text):
-        words = line.split()
-        k = next((j for j, w in enumerate(words) if w.startswith("-")), len(words))
-        if k:
-            _check_pip_spec(sandbox, cwd, " ".join(words[:k]))
-        opts = words[k:]
-        i = 0
-        while i < len(opts):
-            name, eq, value = opts[i].partition("=")
-            if eq and not name.startswith("--"):
-                # optparse gives `-r=x` the value "=x", not "x"
-                raise Refused(f"requirements option {opts[i]!r}: write a short option without '='")
-            if re.fullmatch(r"-[rce].+", name) and not eq:
-                name, value, eq = name[:2], name[2:], "="  # -rfile, -e.
-            if name in ("-r", "--requirement", "-c", "--constraint", "-e", "--editable") \
-                    or name in _REQ_VALUE_OPTS:
-                if not eq:
-                    if i + 1 >= len(opts):
-                        raise Refused(f"requirements option {name!r} needs a value")
-                    i += 1
-                    value = opts[i]
-            if name in ("-r", "--requirement", "-c", "--constraint"):
-                _check_local_path(sandbox, base, value, "requirements file")
-                _check_requirements(sandbox, cwd, os.path.join(base, value), depth=depth + 1)
-            elif name in ("-e", "--editable"):
-                _check_pip_spec(sandbox, cwd, value, editable=True)
-            elif name in _INDEX_OPTS and not _HTTPS_URL.fullmatch(value):
-                raise Refused(f"index URL {value!r} must be https://")
-            elif name not in _REQ_OPTS_OK:
-                raise Refused(f"requirements option {opts[i]!r} is not allowed")
-            i += 1
+        if not _PIP_NAME.fullmatch(line.strip(" ")):
+            raise Refused(f"{REQUIREMENTS_FILE} line {number} {shown(line)!r} is not a plain "
+                          "PyPI name (only names, versions, blank lines and full-line "
+                          "comments are installed; no options, URLs, paths or markers)")
+        names.append(line.strip(" "))
+    if not names:
+        raise Refused(f"{REQUIREMENTS_FILE} names no packages")
+    return names
 
 
 def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
@@ -886,47 +781,34 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
                       f"interpreter. Create it first with: python3 -m venv {VENV_DIR}")
     if not args or args[0] not in _PIP_SUBCOMMANDS:
         raise Refused(f"pip subcommand {args[0] if args else '(none)'!r} is not allowed; "
-                      f"use one of {sorted(_PIP_SUBCOMMANDS)}")
-    if args[0] == "install":
-        try:
-            odd = [n for n in os.listdir(cwd) if ":" in n]
-        except OSError:
-            odd = ["(unreadable)"]
-        if odd:
-            # pip tries an index URL ("https://...") and `name @ https://...`
-            # as paths relative to its cwd before it treats them as URLs.
-            raise Refused(f"pip install will not run next to {odd[0]!r}: pip would read "
-                          "a name with ':' as a local index or package")
-    i = 1
-    while i < len(args):
-        a = args[i]
-        name, eq, value = a.partition("=")
-        if a.startswith("-") and not a.startswith("--") and eq:
-            # optparse gives `-r=x` the value "=x", not "x"
-            raise Refused(f"pip option {a!r}: write a short option without '='")
-        if a in _PIP_FLAGS:
-            pass
-        elif name in _PIP_PATH_OPTS or name in _PIP_VALUE_OPTS:
-            if not eq:
-                if i + 1 >= len(args):
-                    raise Refused(f"pip option {a!r} needs a value")
-                i += 1
-                value = args[i]
-            if name in ("-r", "--requirement", "-c", "--constraint"):
-                _check_local_path(sandbox, cwd, value, "requirements file")
-                _check_requirements(sandbox, cwd, os.path.join(cwd, value), depth=0)
-            elif name in ("-e", "--editable"):
-                _check_pip_spec(sandbox, cwd, value, editable=True)
-            elif name in _INDEX_OPTS and not _HTTPS_URL.fullmatch(value):
-                raise Refused(f"index URL {value!r} must be https://")
-        elif a.startswith("-"):
-            raise Refused(f"pip option {a!r} is not allowed (installs must stay in "
-                          f"{VENV_DIR})")
-        elif args[0] in ("install", "uninstall", "show"):
-            _check_pip_spec(sandbox, cwd, a)
-        i += 1
+                      f"use one of {list(_PIP_SUBCOMMANDS)}")
+    sub, rest = args[0], list(args[1:])
+    if sub == "install" and rest in (["-r", REQUIREMENTS_FILE], [f"-r{REQUIREMENTS_FILE}"],
+                                     ["--requirement", REQUIREMENTS_FILE],
+                                     [f"--requirement={REQUIREMENTS_FILE}"]):
+        names = _requirements_names(sandbox, cwd)
+    else:
+        bad = next((a for a in rest if a.startswith("-")), None)
+        if bad is not None:
+            raise Refused(f"pip option {bad!r} is not allowed: pass plain PyPI names only "
+                          f"(or `pip install -r {REQUIREMENTS_FILE}`, which the guard reads)")
+        if sub in ("list", "freeze", "check"):
+            if rest:
+                raise Refused(f"`pip {sub}` takes no arguments here")
+            names = []
+        else:
+            if not rest:
+                raise Refused(f"`pip {sub}` needs at least one package name")
+            names = [_pip_name(a, "package") for a in rest]
+    if len(names) > _MAX_PIP_NAMES:
+        raise Refused(f"too many packages ({len(names)})")
     python = os.path.join(venv, "bin", "python")
-    return _Plan([python, "-m", "pip", *args],
+    fixed = list(_PIP_COMMON)
+    if sub == "install":
+        fixed += _PIP_INSTALL_FIXED
+    elif sub == "uninstall":
+        fixed.append("--yes")
+    return _Plan([python, "-I", "-m", "pip", sub, *fixed, *names], pip_cwd=True,
                  confirm="pip downloads and runs third-party package code")
 
 
@@ -1122,6 +1004,20 @@ def _confirm(sandbox: Sandbox, cwd: str, plan: _Plan) -> bool:
     return answer.strip().lower() in ("y", "yes")
 
 
+def _empty_dir_outside(sandbox: Sandbox, stack: contextlib.ExitStack) -> Optional[str]:
+    """A fresh, empty, private temp dir that is not inside the root (removed
+    when `stack` closes), or None."""
+    for base in (None, "/tmp"):
+        try:
+            path = os.path.realpath(stack.enter_context(
+                tempfile.TemporaryDirectory(prefix="local_ai-pip-", dir=base)))
+        except OSError:
+            continue
+        if not is_inside(sandbox, path) and not os.listdir(path):
+            return path
+    return None
+
+
 def run_argv(argv: Sequence[str], working_dir: Optional[str] = None) -> Outcome:
     """Run a command through the guard. Never raises for policy reasons:
     a refused, unconfirmed or failed command comes back as an Outcome."""
@@ -1141,15 +1037,25 @@ def run_argv(argv: Sequence[str], working_dir: Optional[str] = None) -> Outcome:
             return Outcome("declined", tuple(plan.argv),
                            reason=f"the person declined it ({plan.confirm})")
     try:
-        # The cwd was resolved earlier; refuse if it has since been swapped
-        # (e.g. for a symlink leading out of the root).
-        if os.path.realpath(cwd) != cwd or not is_inside(sandbox, cwd) or os.path.islink(cwd):
-            return Outcome("refused", tuple(plan.argv), reason="the working dir changed")
-        result = subprocess.run(
-            plan.argv, shell=False, cwd=cwd, env=_child_env(sandbox, plan.env_extra, use_venv=plan.use_venv),
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            errors="replace", timeout=TIMEOUT_S,
-        )
+        with contextlib.ExitStack() as stack:
+            run_cwd = cwd
+            if plan.pip_cwd:
+                # pip resolves index URLs and requirement strings against its
+                # cwd first: give it a fresh empty dir outside the build.
+                run_cwd = _empty_dir_outside(sandbox, stack)
+                if run_cwd is None:
+                    return Outcome("refused", tuple(plan.argv),
+                                   reason="no empty temp dir outside the build for pip")
+            # The cwd was resolved earlier; refuse if it has since been swapped
+            # (e.g. for a symlink leading out of the root).
+            elif os.path.realpath(cwd) != cwd or not is_inside(sandbox, cwd) or os.path.islink(cwd):
+                return Outcome("refused", tuple(plan.argv), reason="the working dir changed")
+            result = subprocess.run(
+                plan.argv, shell=False, cwd=run_cwd,
+                env=_child_env(sandbox, plan.env_extra, use_venv=plan.use_venv),
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                errors="replace", timeout=TIMEOUT_S,
+            )
     except subprocess.TimeoutExpired:
         return Outcome("timeout", tuple(plan.argv), reason=f"timed out after {TIMEOUT_S}s")
     except OSError as e:

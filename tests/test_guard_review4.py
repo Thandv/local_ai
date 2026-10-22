@@ -47,13 +47,6 @@ class ReqFileRound4(SandboxCase):
         self.req("file:%2E%2E/outside\n")
         self.assertNotRun("pip install -r requirements.txt")
 
-    def test_e_hash_option_with_a_space_separated_value_still_installs(self) -> None:
-        # Valid pip syntax (optparse), accepted before 215a123.
-        self.req("six==1.16.0 --hash sha256:" + "a" * 64 + "\n")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
-
-
 class EchoRound4(_Base):
     def test_f_resume_does_not_echo_build_log_text_raw(self) -> None:
         # BUILD_LOG.json is model-writable (the premise of the resume fix).
@@ -121,13 +114,6 @@ class Round4MutationPins(SandboxCase):
         os.symlink(self.outside, self.root / "link")
         self.req("-e link\n")
         self.assertNotRun("pip install -r requirements.txt")
-
-    def test_attached_short_option_values_still_run(self) -> None:
-        self.req("six\n", "other.txt")
-        self.req("-rother.txt\n-e.\n")
-        result = tools.run_command("pip install -r requirements.txt")
-        self.assertFalse(result.startswith("Refused:"), result)
-
 
 class EveryStageEchoTests(support.GuardedTestCase):
     """Every stage's tool-call echo escapes the model's tool name, path and command."""

@@ -3,10 +3,12 @@
 Each bypass was checked offline against pip 26.1.1's own parser
 (parse_req_from_line, parse_requirements, the install option parser and
 PackageFinder.find_all_candidates with the network blocked)."""
+import os
+
 import support  # noqa: F401
 from local_ai.agents.shared import tools
 
-from test_tools_guard import SandboxCase
+from test_tools_guard import SandboxCase, _completed
 
 
 class Round7(SandboxCase):
@@ -39,15 +41,22 @@ class Round7(SandboxCase):
         self.req(spec + "\n")
         self.assertNotRun("pip install -r requirements.txt")
 
-    def test_c_https_dir_in_cwd_is_a_local_index(self) -> None:
+    def test_c_https_dir_in_cwd_is_never_pips_cwd(self) -> None:
         # build_source() tries os.path.exists("https://pypi.org/simple/six/")
-        # first; a model-written tree there is used as the (default) index, and
-        # its links may be file:///outside archives.
+        # first; a model-written tree there would become the (default) index.
+        # Since review8 pip runs in a fresh empty dir outside the build.
         page = self.root / "https:" / "pypi.org" / "simple" / "six"
         page.mkdir(parents=True)
         (page / "index.html").write_text(
             f'<a href="file://{self.outside}/six-9.0.tar.gz">six-9.0.tar.gz</a>\n')
-        self.assertNotRun("pip install six")
+        seen = []
+        self.run_mock.side_effect = lambda argv, **kw: seen.append(
+            (kw["cwd"], os.listdir(kw["cwd"]))) or _completed(argv)
+        self.assertFalse(tools.run_command("pip install six").startswith("Refused"))
+        cwd, entries = seen[0]
+        self.assertFalse(cwd.startswith(str(self.root)), cwd)
+        self.assertEqual(entries, [])
+        self.run_mock.reset_mock()
         self.assertNotRun("pip install -i https://pypi.org/simple six")
 
     def test_d_coding_line_hidden_from_the_checker(self) -> None:
@@ -66,15 +75,16 @@ class Round7(SandboxCase):
 
 
 class Round7Allowed(SandboxCase):
-    def test_ordinary_lines_still_run(self) -> None:
+    def test_only_plain_names_still_run(self) -> None:
         self.make_venv()
         self.set_sandbox(yes_unsafe=True)
-        (self.root / "requirements.txt").write_text(
-            "# pinned\r\nsix==1.16 \\\r\n    --hash=sha256:abc\r\n"
-            "pkg @ https://example.com/a/pkg-1.0.tar.gz\n", encoding="utf-8")
+        (self.root / "requirements.txt").write_text("# pinned\nsix==1.16\n", encoding="utf-8")
         for command in ("pip install -r requirements.txt",
-                        "pip install --requirement=requirements.txt",
-                        "pip install 'pkg @ https://example.com/pkg-1.0.tar.gz'",
-                        "pip install six"):
+                        "pip install --requirement=requirements.txt", "pip install six"):
             with self.subTest(command=command):
                 self.assertFalse(tools.run_command(command).startswith("Refused"))
+        (self.root / "requirements.txt").write_text(
+            "six==1.16 \\\n    --hash=sha256:abc\n", encoding="utf-8")
+        self.run_mock.reset_mock()
+        self.assertNotRun("pip install -r requirements.txt")
+        self.assertNotRun("pip install 'pkg @ https://example.com/pkg-1.0.tar.gz'")

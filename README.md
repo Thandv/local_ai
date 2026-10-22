@@ -99,19 +99,23 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   stdin is a TTY, and refused when it is not. `--yes-unsafe` on the
   `build-app`, `vibe` or `agent` command line skips that prompt; the model
   cannot set it.
-- **Installs.** `pip` runs only as `ROOT/.venv/bin/python -m pip` (the model
-  creates the venv with `python3 -m venv .venv`), never the PATH interpreter;
-  options that install elsewhere (`--user`, `--target`, `--prefix`, ...) are
-  refused. Package specs, on the command line and on every line of a `-r`/`-c`
-  requirements file, must match a strict allowlist: `name[extras]` with
-  version specifiers and an optional marker, `name @ https://...`,
-  `git+https://...`, or a plain relative path inside the build. `file:` URLs,
-  other schemes, `${VAR}`, unusual encodings, backslashes other than a
-  trailing ` \`, a `#subdirectory=` that leaves the archive, `.`/`..` URL
-  segments, short options written as `-r=x`, and non-https index URLs are
-  refused rather than interpreted. `pip install` also refuses to run next to a
-  file or dir whose name has a `:` (pip would read `https://...` as a local
-  path). `npm install` runs only next
+- **Installs.** pip never reads a file the model wrote and never gets an
+  option or path from it. The model may run `pip install <names>`,
+  `pip uninstall/show <names>`, `pip list/freeze/check`, or
+  `pip install -r requirements.txt`; every other pip option is refused. The
+  guard reads that one `requirements.txt` itself. It must be plain ASCII with
+  `\n` line ends, and every line must be blank, a full-line `#` comment or a
+  plain PyPI name (`name`, `name[extra]`, `name==1.2,<2`; no spaces, markers,
+  URLs, paths, hashes or options). Any other line refuses the whole file.
+  The names go to pip as separate arguments:
+  `ROOT/.venv/bin/python -I -m pip install --isolated --no-input
+  --disable-pip-version-check --index-url https://pypi.org/simple
+  --only-binary=:all: <names>`, run in a fresh empty temp dir outside the
+  build, with the scrubbed environment (no `PIP_*` or `PYTHON*` variables).
+  Wheels only: a package that publishes only an sdist will not install.
+  Hash-pinned, editable (`-e .`), URL and local-path installs are not
+  available to the model; run those yourself.
+  `npm install` runs only next
   to a package.json in the working dir; `-g`, `-C`, `--global`, `--prefix`
   and similar options are refused in any npm command. Both always need the confirmation (or
   `--yes-unsafe`), so a build with no TTY installs nothing.
