@@ -374,9 +374,17 @@ def _plain_file_in_cwd(cwd: str, name: str) -> Optional[str]:
 
 _PYTEST_FLAGS = {"-q", "-qq", "-v", "-vv", "-vvv", "-x", "-s", "-l", "-ra", "-rA", "-rf",
                  "--quiet", "--verbose", "--exitfirst", "--no-header", "--collect-only",
-                 "--co", "--disable-warnings", "--showlocals", "--strict-markers",
-                 "--lf", "--ff", "--last-failed", "--failed-first"}
+                 "--co", "--disable-warnings", "--showlocals", "--strict-markers"}
 _PYTEST_VALUE_PREFIXES = ("--tb=", "--maxfail=", "--color=", "--durations=")
+
+
+def _pytest_pinned(sandbox: Sandbox) -> list:
+    """Options forced on every allowlisted pytest run. pytest.ini/pyproject
+    addopts are model-written and come before the command line, so these
+    override an addopts --basetemp (which pytest empties) and keep the cache
+    from writing outside the root."""
+    return [f"--basetemp={os.path.join(str(sandbox.root), '.pytest_tmp')}",
+            "-p", "no:cacheprovider"]
 
 
 def _pytest_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
@@ -755,7 +763,7 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
                 return _Plan([base, "-m", "venv", os.path.join(str(sandbox.root), VENV_DIR)])
             python = exe(prog)
             if module == "pytest" and _pytest_args_ok(sandbox, cwd, margs):
-                return _Plan([python, "-m", "pytest", *margs])
+                return _Plan([python, "-m", "pytest", *_pytest_pinned(sandbox), *margs])
             if module == "unittest" and _unittest_args_ok(sandbox, cwd, margs):
                 return _Plan([python, "-m", "unittest", *margs])
             if module == "py_compile" and margs and all(
@@ -767,8 +775,10 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
     if prog in ("pip", "pip3"):
         return _pip_plan(sandbox, cwd, args)
     if prog == "pytest":
-        return _Plan([exe("pytest"), *args], confirm="" if _pytest_args_ok(sandbox, cwd, args)
-                     else "these pytest options are not on the allowlist")
+        if _pytest_args_ok(sandbox, cwd, args):
+            return _Plan([exe("pytest"), *_pytest_pinned(sandbox), *args])
+        return _Plan([exe("pytest"), *args],
+                     confirm="these pytest options are not on the allowlist")
     if prog == "npm":
         return _npm_plan(sandbox, cwd, args)
     if prog == "node":
@@ -801,7 +811,9 @@ def _printable(arg: str) -> str:
 
 def _has_tty() -> bool:
     try:
-        return sys.stdin is not None and sys.stdin.isatty()
+        # Both ends: a prompt the person cannot see is not a confirmation.
+        return (sys.stdin is not None and sys.stdin.isatty()
+                and sys.stdout is not None and sys.stdout.isatty())
     except (ValueError, OSError):
         return False
 

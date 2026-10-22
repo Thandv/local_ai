@@ -17,6 +17,7 @@ import support  # noqa: F401  (installs the guard before local_ai imports)
 from local_ai.agents.shared import guard, llm, tools
 
 SECRET = "invented-secret-value"
+REAL_HAS_TTY = guard._has_tty
 
 
 def _completed(argv, rc=0, out="ran ok"):
@@ -260,6 +261,12 @@ class RunCommandRefusalTests(SandboxCase):
         self.assertIn("declined", result)
         self.ask.assert_called_once()
 
+    def test_stdin_tty_with_redirected_stdout_is_not_a_tty(self) -> None:
+        # The person could not see the prompt, so nobody can confirm.
+        with mock.patch.object(guard.sys, "stdin", mock.Mock(isatty=lambda: True)), \
+                mock.patch.object(guard.sys, "stdout", mock.Mock(isatty=lambda: False)):
+            self.assertFalse(REAL_HAS_TTY())
+
     def test_eof_at_the_prompt_is_a_decline(self) -> None:
         self.tty = True
         self.ask.side_effect = EOFError
@@ -311,7 +318,7 @@ class RunCommandRefusalTests(SandboxCase):
                         "python3 -m pip_audit", "python3 -X dev -m pytest",
                         "python3 -m pytest --basetemp=/tmp/x", "python3 -m pytest -p evil",
                         "python3 -m pytest --rootdir=/", "python3 -m pytest ../outside",
-                        "python3 -m pytest -c /etc/x.ini", "pytest --junitxml=/tmp/x.xml",
+                        "python3 -m pytest -c /etc/x.ini", "pytest --junitxml=/tmp/x.xml", "pytest --lf", "pytest --ff",
                         "python3 -m unittest os", "python3 -m unittest antigravity",
                         "python3 -m unittest discover -s ../outside",
                         "python3 -m py_compile ../outside/x.py", "python3 -m py_compile -"):
@@ -454,7 +461,7 @@ class RunCommandAllowedTests(SandboxCase):
         (self.root / "app.js").write_text("", encoding="utf-8")
         (self.root / "main.py").write_text("", encoding="utf-8")
         allowed = ["python3 -m unittest discover -s tests -v", "python -m unittest tests",
-                   "python3 -m pytest -q tests/test_x.py::test_a", "pytest -v -k 'a or b'",
+                   "python3 -m pytest -q tests/test_x.py::test_a", "pytest -x --tb=short", "pytest -v -k 'a or b'",
                    "python3 -m py_compile main.py", "node app.js --port 3000",
                    "node --test tests", "ls -la", "ls tests", "cat main.py", "cat -n main.py",
                    "git init", "git status", "git diff --stat HEAD~1", "git add .",
@@ -466,6 +473,19 @@ class RunCommandAllowedTests(SandboxCase):
                 self.assertFalse(result.startswith("Refused"), result)
                 self.assertIs(self.run_kwargs()["shell"], False)
         self.ask.assert_not_called()
+
+    def test_pytest_basetemp_and_cache_are_pinned_inside_the_root(self) -> None:
+        # pytest.ini/pyproject addopts are model-written: an addopts
+        # --basetemp=<outside> would make pytest empty that directory, and
+        # cache_dir would write outside. CLI options after addopts win.
+        for command in ("python3 -m pytest -q", "pytest -q"):
+            with self.subTest(command=command):
+                self.run_mock.reset_mock()
+                tools.run_command(command)
+                argv = self.run_argv()
+                self.assertIn(f"--basetemp={self.root}/.pytest_tmp", argv)
+                self.assertEqual(argv[argv.index("-p", 1) + 1], "no:cacheprovider")
+                self.assertEqual(argv[-1], "-q")  # forced options come before the model's
 
     def test_git_gets_hooks_disabled_and_a_ceiling(self) -> None:
         tools.run_command("git commit -m x")

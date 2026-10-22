@@ -88,7 +88,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   package.json script is one plain test-runner command (jest, vitest, mocha,
   ava, tap or `node <script>`) with no pre/post hook. Options that write or
   read elsewhere (`pytest --basetemp`, `git -c`, `git diff --output`,
-  `node -e`, `python -c`, ...) are not on it.
+  `node -e`, `python -c`, ...) are not on it. Every allowlisted pytest run also gets
+  `--basetemp=ROOT/.pytest_tmp -p no:cacheprovider`, so `addopts` in a
+  model-written `pytest.ini` cannot point those outside the root.
 - **Confirmation.** Anything else is shown to you with a `y/N` prompt when
   stdin is a TTY, and refused when it is not. `--yes-unsafe` on the
   `build-app`, `vibe` or `agent` command line skips that prompt; the model

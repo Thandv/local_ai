@@ -245,7 +245,8 @@ class GateThroughTheRealGuardTests(GateCase):
         self.assertEqual(gate["status"], "pass")
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0],
-                         [str(venv / "bin" / "python"), "-m", "pytest", "-q"])
+                         [str(venv / "bin" / "python"), "-m", "pytest",
+                          f"--basetemp={self.out}/.pytest_tmp", "-p", "no:cacheprovider", "-q"])
         self.assertIs(run.call_args.kwargs["shell"], False)
         self.assertEqual(run.call_args.kwargs["cwd"], str(self.out))
 
