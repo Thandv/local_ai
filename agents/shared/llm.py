@@ -351,14 +351,35 @@ def run_agent_loop(
     tools: list,
     handlers: ToolHandlers,
     history: list = None,
-    on_tool_call=None,
+    on_tool_call: Optional[Callable[[str, dict], None]] = None,
     max_rounds: int = 20,
     repeat_limit: int = 3,
 ) -> str:
     """
-    Full agentic loop:
-      1. Call the model with system + user prompt (streaming tokens to stdout)
-      2. If it returns tool calls, execute them and feed results back
+    One-shot agentic task: system + optional history + user prompt, then
+    run_tool_loop() until the model answers in plain text.
+    """
+    messages = list(history or [])
+    messages.insert(0, {"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    return run_tool_loop(messages, tools, handlers, on_tool_call=on_tool_call,
+                         max_rounds=max_rounds, repeat_limit=repeat_limit)
+
+
+def run_tool_loop(
+    messages: list,
+    tools: list,
+    handlers: ToolHandlers,
+    on_tool_call: Optional[Callable[[str, dict], None]] = None,
+    max_rounds: int = 20,
+    repeat_limit: int = 3,
+) -> str:
+    """
+    Bounded tool loop on a caller-owned message list (appended in place, so a
+    REPL keeps its history across turns):
+      1. Call the model (streaming tokens to stdout)
+      2. If it returns tool calls (native or embedded in content), run each
+         through dispatch_tool_call() and feed the results back
       3. Repeat until a plain-text response is returned
 
     Tool call IDs (present when using Claude) are forwarded in tool result
@@ -368,14 +389,13 @@ def run_agent_loop(
     same args) `repeat_limit` times in a row, the loop returns early. This
     prevents pathological loops like running `pytest tests/` 15 times when
     there are no tests to find.
-    """
-    messages = list(history or [])
-    messages.insert(0, {"role": "system", "content": system})
-    messages.append({"role": "user", "content": user})
 
+    Round limit: after `max_rounds` model calls without a plain-text answer
+    the loop stops, prints why, and returns that notice; it never raises.
+    """
     recent_signatures: list[str] = []
 
-    for round_n in range(max_rounds):
+    for _ in range(max_rounds):
         msg = chat(messages, tools=tools)
         messages.append(msg)
 
@@ -405,23 +425,26 @@ def run_agent_loop(
                     f"summary of what you've accomplished and what's blocking you.")
                 messages.append({"role": "user", "content": stop_note})
                 # Append the result one last time so the conversation is consistent
-                result = dispatch_tool_call(name, raw, handlers)
-                tool_msg: dict = {"role": "tool", "content": result}
-                if tool_use_id:
-                    tool_msg["tool_use_id"] = tool_use_id
-                messages.append(tool_msg)
+                messages.append(_tool_message(dispatch_tool_call(name, raw, handlers),
+                                              tool_use_id))
                 # One more round, no tools, to extract a text answer
                 final = chat(messages, tools=[])
+                messages.append(final)
                 return (final.get("content") or "").strip()
 
             if on_tool_call:
                 on_tool_call(name, args or {})
 
-            result = dispatch_tool_call(name, raw, handlers)
+            messages.append(_tool_message(dispatch_tool_call(name, raw, handlers),
+                                          tool_use_id))
 
-            tool_msg: dict = {"role": "tool", "content": result}
-            if tool_use_id:
-                tool_msg["tool_use_id"] = tool_use_id
-            messages.append(tool_msg)
+    notice = f"[agent] stopped after {max_rounds} rounds without a final answer."
+    print(f"\n    {notice}")
+    return notice
 
-    return messages[-1].get("content", "").strip()
+
+def _tool_message(result: str, tool_use_id: Optional[str]) -> dict:
+    tool_msg: dict = {"role": "tool", "content": result}
+    if tool_use_id:
+        tool_msg["tool_use_id"] = tool_use_id
+    return tool_msg

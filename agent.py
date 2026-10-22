@@ -9,13 +9,12 @@ Model: set LOCAL_AI_MODEL env var or use --model flag.
 
 import os
 import sys
-import json
 import subprocess
 import glob as glob_module
 from pathlib import Path
 from typing import Optional
 
-from local_ai.agents.shared.llm import chat as _llm_chat, set_model, get_model
+from local_ai.agents.shared.llm import run_tool_loop, set_model, get_model
 
 MAX_TOOL_OUTPUT = 8000  # chars — truncate large outputs so context stays clean
 
@@ -188,72 +187,13 @@ TOOL_HANDLERS = {
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
-def extract_tool_calls_from_content(content: str) -> Optional[list]:
-    """Extract one or more tool-call JSON objects embedded in the content field."""
-    if not content:
-        return None
-    calls = []
-    depth = 0
-    start = None
-    for i, ch in enumerate(content):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                fragment = content[start : i + 1]
-                try:
-                    obj = json.loads(fragment)
-                    if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-                        calls.append({"function": {"name": obj["name"], "arguments": obj["arguments"]}})
-                except json.JSONDecodeError:
-                    pass
-                start = None
-    return calls if calls else None
+def _show_call(name: str, args: dict) -> None:
+    print(f"\n  [{name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})]")
 
 
 def run_agent(messages: list) -> str:
-    while True:
-        msg = _llm_chat(messages, tools=TOOLS)
-        messages.append(msg)
-
-        tool_calls = msg.get("tool_calls")
-
-        # Fallback: some models embed tool calls as JSON in content
-        if not tool_calls:
-            tool_calls = extract_tool_calls_from_content(msg.get("content", ""))
-
-        # No tool calls — we have our final answer
-        if not tool_calls:
-            return msg.get("content", "")
-
-        # Execute each tool call
-        for call in tool_calls:
-            fn_name = call["function"]["name"]
-            raw_args = call["function"].get("arguments", {})
-
-            # Ollama sometimes returns args as a JSON string
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = raw_args
-
-            handler = TOOL_HANDLERS.get(fn_name)
-            if handler:
-                print(f"\n  [{fn_name}({', '.join(f'{k}={repr(v)[:60]}' for k, v in args.items())})]")
-                tool_result = handler(**args)
-            else:
-                tool_result = f"Unknown tool: {fn_name}"
-
-            messages.append({
-                "role": "tool",
-                "content": tool_result,
-            })
+    """Run one REPL turn on the shared, bounded tool loop (history kept in messages)."""
+    return run_tool_loop(messages, TOOLS, TOOL_HANDLERS, on_tool_call=_show_call)
 
 # ── REPL ──────────────────────────────────────────────────────────────────────
 

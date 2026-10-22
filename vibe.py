@@ -11,14 +11,13 @@ Model: set LOCAL_AI_MODEL env var or use --model flag.
 
 import os
 import sys
-import json
 import subprocess
 import glob as glob_module
 import re
 from pathlib import Path
 from typing import Optional
 
-from local_ai.agents.shared.llm import chat as _llm_chat, set_model, get_model
+from local_ai.agents.shared.llm import run_tool_loop, set_model, get_model
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -245,63 +244,15 @@ TOOL_HANDLERS = {
     "search_code": search_code,
 }
 
-def extract_json_tool_call(content: str) -> Optional[list]:
-    """Extract one or more tool-call JSON objects embedded in the content field."""
-    if not content:
-        return None
-    calls = []
-    # Find all top-level {...} blocks in the text
-    depth = 0
-    start = None
-    for i, ch in enumerate(content):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                fragment = content[start : i + 1]
-                try:
-                    obj = json.loads(fragment)
-                    if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-                        calls.append({"function": {"name": obj["name"], "arguments": obj["arguments"]}})
-                except json.JSONDecodeError:
-                    pass
-                start = None
-    return calls if calls else None
-
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
+def _show_call(name: str, args: dict) -> None:
+    print(f"\n  [{name}]", end="")
+
+
 def run_agent(messages: list) -> str:
-    while True:
-        msg = _llm_chat(messages, tools=TOOLS)
-        messages.append(msg)
-
-        tool_calls = msg.get("tool_calls") or extract_json_tool_call(msg.get("content", ""))
-
-        if not tool_calls:
-            return msg.get("content", "")
-
-        for call in tool_calls:
-            fn_name = call["function"]["name"]
-            raw_args = call["function"].get("arguments", {})
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = raw_args
-
-            handler = TOOL_HANDLERS.get(fn_name)
-            if handler:
-                print(f"\n  [{fn_name}]", end="")
-                tool_result = handler(**args)
-            else:
-                tool_result = f"Unknown tool: {fn_name}"
-
-            messages.append({"role": "tool", "content": tool_result})
+    """Run one REPL turn on the shared, bounded tool loop (history kept in messages)."""
+    return run_tool_loop(messages, TOOLS, TOOL_HANDLERS, on_tool_call=_show_call)
 
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
