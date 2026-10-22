@@ -102,9 +102,10 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
 - **Installs.** `pip` runs only as `ROOT/.venv/bin/python -m pip` (the model
   creates the venv with `python3 -m venv .venv`), never the PATH interpreter;
   options that install elsewhere (`--user`, `--target`, `--prefix`, ...) are
-  refused, also inside a `-r` requirements file. `npm install` runs only next
-  to a package.json in the working dir; `-g`, `--global`, `--prefix` and
-  similar options are refused in any npm command. Both always need the confirmation (or
+  refused, also on every line of a `-r`/`-c` requirements file (which may
+  not use `${VAR}` expansion). `npm install` runs only next
+  to a package.json in the working dir; `-g`, `-C`, `--global`, `--prefix`
+  and similar options are refused in any npm command. Both always need the confirmation (or
   `--yes-unsafe`), so a build with no TTY installs nothing.
 - **Untrusted text.** `peek_readme`, `clone_shallow`, `search_github` and the
   repo snippets are wrapped as `<untrusted-data>` blocks, and the Researcher's
@@ -144,7 +145,8 @@ decides it:
 Any other stage that raises prints a warning, is recorded in `stage_errors`,
 and the pipeline continues. A build or `--resume` run of `build-app` exits
 with status 1 when the verdict is `FAILED` and 0 otherwise. `build-app --resume DIR` skips the stages listed
-in `completed_stages` (a finished tester's `test_results` are restored); a stage that raised is not listed, so a resume retries
+in `completed_stages` (when the tester had finished, its test gate is run again rather than read
+from `BUILD_LOG.json`, which model-run code could have rewritten); a stage that raised is not listed, so a resume retries
 it.
 
 **The test gate.** After the Tester agent writes and runs its tests, the
@@ -154,8 +156,8 @@ the model's own report is not used. It records `test_results` (`status`
 pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
 `BUILD_LOG.json` and prints a `Tests` line in the summary.
 
-- Python tests (`test_*.py` or `*_test.py` files) run with the build
-  venv's interpreter: `.venv/bin/python -m pytest -q` when `.venv/bin/pytest`
+- Python tests (`test*.py` or `*_test.py` files) run with the build
+  venv's interpreter: `.venv/bin/python -m pytest` when `.venv/bin/pytest`
   exists, else `-m unittest discover`. Tests that import pytest, or a
   `conftest.py`/`pytest.ini`, with no pytest in `.venv` are skipped; so are
   tests with no `.venv`.

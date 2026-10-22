@@ -80,7 +80,7 @@ Project files:
         elif name == "run_command":
             print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     project.audit = run_agent_loop(
         system=SYSTEM,

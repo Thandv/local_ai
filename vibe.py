@@ -125,7 +125,7 @@ def _show_call(name: str, args: dict) -> None:
     elif name == "write_file":
         print(f"\n    write {shown(args.get('path', ''))}")
     else:
-        print(f"\n  [{name}]", end="")
+        print(f"\n  [{shown(name)}]", end="")
 
 
 def run_agent(messages: list) -> str:

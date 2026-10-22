@@ -84,7 +84,7 @@ Write every file completely — no placeholders.
         elif name == "run_command":
             print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     run_agent_loop(
         system=SYSTEM,

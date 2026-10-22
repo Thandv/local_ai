@@ -73,7 +73,8 @@ def _scan_python_tests(out: Path) -> tuple[bool, bool]:
         for name in filenames:
             if name in ("conftest.py", "pytest.ini"):
                 needs_pytest = True
-            if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
+            # unittest discover's default pattern is test*.py; pytest's adds *_test.py
+            if name.endswith(".py") and (name.startswith("test") or name.endswith("_test.py")):
                 has = True
                 if not needs_pytest:
                     text = _read_plain(Path(dirpath) / name)
@@ -125,7 +126,7 @@ def detect_test_command(out: Path) -> dict:
             return {"runner": "python", "status": "skipped",
                     "reason": f"no build venv ({VENV_DIR}) to run the Python tests in"}
         if (venv / "bin" / "pytest").is_file():
-            return {"runner": "pytest", "argv": [str(python), "-m", "pytest", "-q"]}
+            return {"runner": "pytest", "argv": [str(python), "-m", "pytest"]}
         if needs_pytest:
             return {"runner": "pytest", "status": "skipped",
                     "reason": f"the tests use pytest, which is not installed in {VENV_DIR}"}
@@ -234,7 +235,7 @@ Files already written:
         elif name == "run_command":
             print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     run_agent_loop(
         system=SYSTEM,

@@ -81,7 +81,7 @@ Review all source files, fix any critical issues, then write REVIEW.md to {out}/
         if name == "write_file":
             print(f"    [write] {shown(args.get('path', ''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     project.review = run_agent_loop(
         system=SYSTEM,

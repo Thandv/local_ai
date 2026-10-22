@@ -61,7 +61,7 @@ After writing the plan, respond with a short summary of the architecture.
         if name == "write_file":
             print(f"    [write] {shown(args.get('path', ''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     result = run_agent_loop(
         system=SYSTEM,

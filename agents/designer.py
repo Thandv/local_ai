@@ -54,7 +54,7 @@ Then give a one-paragraph summary of the overall design approach.
         if name == "write_file":
             print(f"    [write] {shown(args.get('path', ''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     result = run_agent_loop(
         system=SYSTEM,

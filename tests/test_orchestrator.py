@@ -168,10 +168,22 @@ class PipelineCase(support.GuardedTestCase):
             for name in STAGES:
                 module = getattr(orchestrator, name)
                 stack.enter_context(mock.patch.object(module, "run", self._fake(name)))
+            # On resume the gate is re-run (never restored from BUILD_LOG.json).
+            stack.enter_context(mock.patch.object(orchestrator.tester, "run_test_gate",
+                                                  self._gate))
             stack.enter_context(contextlib.redirect_stdout(out))
             stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             project = orchestrator.run(**kwargs)
         return project, out.getvalue()
+
+    def _gate(self, project: Project) -> dict:
+        self.gate_runs = getattr(self, "gate_runs", 0) + 1
+        results = getattr(self, "tester_results", None)
+        if results:
+            return dict(results)
+        passed = getattr(self, "tester_passes", False)
+        return {"status": "pass" if passed else "fail", "runner": "pytest",
+                "returncode": 0 if passed else 1, "reason": "", "output_tail": ""}
 
     def _build(self) -> tuple[Project, str]:
         return self._run(instruction="invented habit tracker", output_dir=self.out)
@@ -280,6 +292,7 @@ class ReviewFollowUpPipelineTests(PipelineCase):
         self.called = []
         project, _ = self._run(instruction="", resume_dir=self.out)
         self.assertEqual(self.called, [])
+        self.assertEqual(self.gate_runs, 1)  # re-run on resume, not restored
         self.assertEqual(project.verdict, Verdict.SUCCESS)
         self.assertEqual(self._log()["verdict"], "SUCCESS")
 

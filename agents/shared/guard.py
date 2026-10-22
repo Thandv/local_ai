@@ -718,40 +718,92 @@ _REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-bin
                 "--only-binary", "--no-binary", "--require-hashes", "--hash"}
 
 
-def _check_requirements(sandbox: Sandbox, path: str, *, depth: int) -> None:
-    """Apply the pip path rules to the lines of a requirements/constraints
-    file too (the confirmation prompt shows only `-r <file>`)."""
+def _local_path_of(spec: str) -> Optional[str]:
+    """The local path a pip spec or npm spec names, if any: a 'file:' URL,
+    `name @ file:///...`, or something that looks like a path."""
+    if "file:" in spec:
+        url = spec[spec.index("file:"):]
+        path = url[len("file:"):]
+        return path[2:] if path.startswith("//") else path
+    if "://" in spec:
+        return None
+    head = spec.split(";")[0].strip()
+    if head.startswith((".", "/", "~")) or "/" in head:
+        return head
+    return None
+
+
+def _join_requirement_lines(text: str) -> list:
+    """pip's line handling: drop comments, join backslash continuations."""
+    lines, current = [], ""
+    for raw in text.splitlines():
+        line = re.sub(r"(^|\s)#.*$", "", raw)
+        if line.endswith("\\"):
+            current += line[:-1] + " "
+            continue
+        current += line
+        if current.strip():
+            lines.append(current.strip())
+        current = ""
+    if current.strip():
+        lines.append(current.strip())
+    return lines
+
+
+def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) -> None:
+    """Apply the pip path rules to every line of a requirements/constraints
+    file too (the confirmation prompt shows only `-r <file>`). As in pip,
+    nested -r/-c paths are relative to the file, -e and bare paths to the cwd."""
     if depth > 3:
         raise Refused("requirements files nest too deeply")
     real = os.path.realpath(path)
     if not is_inside(sandbox, real) or not _single_link_file(path):
         raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
     with open(real, "r", encoding="utf-8", errors="replace") as f:
-        lines = f.read(1_000_000).splitlines()
+        text = f.read(1_000_000)
+    if re.search(r"\$\{[^}]*\}", text):
+        raise Refused("requirements files may not use ${VAR} expansion")
     base = os.path.dirname(real)
-    for raw in lines:
-        line = raw.split(" #", 1)[0].strip()
-        if not line or line.startswith("#"):
-            continue
+    for line in _join_requirement_lines(text):
         try:
             tokens = shlex.split(line)
         except ValueError:
             raise Refused(f"cannot parse requirements line {line!r}")
-        first = tokens[0]
-        if first.startswith("-"):
-            name, eq, value = first.partition("=")
-            if not eq and len(tokens) > 1:
-                value = tokens[1]
-            if name in _PIP_PATH_OPTS:
+        if not tokens[0].startswith("-"):
+            local = _local_path_of(line)
+            if local is not None and not _path_ok(sandbox, cwd, local):
+                raise Refused(f"requirements line {line!r} points outside the build dir")
+            # anything after the requirement is per-requirement options (--hash)
+            tokens = [t for t in tokens[1:] if t.startswith("-")]
+        i = 0
+        while i < len(tokens):
+            name, eq, value = tokens[i].partition("=")
+            if name.startswith("-") and not name.startswith("--") and len(name) > 2 \
+                    and not eq:
+                name, value, eq = name[:2], name[2:], "="  # -e/path, -r file
+            needs_value = name in _PIP_PATH_OPTS or name in ("-i", "--index-url",
+                                                               "--extra-index-url",
+                                                               "--only-binary", "--no-binary",
+                                                               "--hash")
+            if needs_value and not eq:
+                if i + 1 >= len(tokens):
+                    raise Refused(f"requirements option {name!r} needs a value")
+                i += 1
+                value = tokens[i]
+            if name in ("-r", "--requirement", "-c", "--constraint"):
                 if not _path_ok(sandbox, base, value):
                     raise Refused(f"requirements line {line!r} points outside the build dir")
-                if name in ("-r", "--requirement", "-c", "--constraint"):
-                    _check_requirements(sandbox, os.path.join(base, value), depth=depth + 1)
+                _check_requirements(sandbox, cwd, os.path.join(base, value), depth=depth + 1)
+            elif name in ("-e", "--editable"):
+                local = _local_path_of(value) if not value.startswith(("git+", "hg+", "svn+",
+                                                                       "bzr+")) else None
+                if local is None and "://" not in value:
+                    local = value
+                if local is not None and not _path_ok(sandbox, cwd, local):
+                    raise Refused(f"requirements line {line!r} points outside the build dir")
             elif name not in _REQ_OPTS_OK:
                 raise Refused(f"requirements option {name!r} is not allowed")
-        elif (first.startswith((".", "/", "~")) or "/" in first.split(";")[0]) \
-                and "://" not in first and not _path_ok(sandbox, base, first):
-            raise Refused(f"requirements line {line!r} points outside the build dir")
+            i += 1
 
 
 def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
@@ -777,12 +829,11 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
             if name in _PIP_PATH_OPTS and not _path_ok(sandbox, cwd, value):
                 raise Refused(f"pip {name} {value!r} must be a path inside the build dir")
             if name in ("-r", "--requirement", "-c", "--constraint"):
-                _check_requirements(sandbox, os.path.join(cwd, value), depth=0)
+                _check_requirements(sandbox, cwd, os.path.join(cwd, value), depth=0)
         elif a.startswith("-"):
             raise Refused(f"pip option {a!r} is not allowed (installs must stay in "
                           f"{VENV_DIR})")
-        elif (a.startswith((".", "/", "~")) or "/" in a) and "://" not in a \
-                and not _path_ok(sandbox, cwd, a):
+        elif _local_path_of(a) is not None and not _path_ok(sandbox, cwd, _local_path_of(a)):
             raise Refused(f"pip path {a!r} must be inside the build dir")
         i += 1
     python = os.path.join(venv, "bin", "python")
@@ -802,9 +853,9 @@ _NPM_LEAVES_BUILD = ("global", "prefix", "location", "userconfig", "globalconfig
 
 
 def _npm_option_leaves_build(tok: str) -> bool:
-    """-g / --global / --prefix / --location ... in any position, including
-    the abbreviations npm's option parser expands (e.g. --glob)."""
-    if tok == "-g" or (tok.startswith("-") and not tok.startswith("--") and "g" in tok[1:]):
+    """-g / -C / --global / --prefix / --location ... in any position, including
+    short-flag clusters and the abbreviations npm's parser expands (--glob)."""
+    if tok.startswith("-") and not tok.startswith("--") and ("g" in tok[1:] or "C" in tok[1:]):
         return True
     if not tok.startswith("--"):
         return False

@@ -83,7 +83,7 @@ Files written so far:
         elif name == "run_command":
             print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     debug_output = run_agent_loop(
         system=SYSTEM,

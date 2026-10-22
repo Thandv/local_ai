@@ -107,7 +107,7 @@ class DetectAndRunTests(GateCase):
         self.py_tests()
         gate = tester.run_test_gate(self.project)
         self.run_argv.assert_called_once_with(
-            [str(venv / "bin" / "python"), "-m", "pytest", "-q"])
+            [str(venv / "bin" / "python"), "-m", "pytest"])
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["runner"], "pytest")
 
@@ -246,7 +246,7 @@ class GateThroughTheRealGuardTests(GateCase):
         run.assert_called_once()
         self.assertEqual(run.call_args.args[0],
                          [str(venv / "bin" / "python"), "-m", "pytest",
-                          f"--basetemp={self.out}/.pytest_tmp", "-p", "no:cacheprovider", "-q"])
+                          f"--basetemp={self.out}/.pytest_tmp", "-p", "no:cacheprovider"])
         self.assertIs(run.call_args.kwargs["shell"], False)
         self.assertEqual(run.call_args.kwargs["cwd"], str(self.out))
 

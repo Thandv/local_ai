@@ -73,7 +73,7 @@ After writing all files, list what was generated.
         if name == "write_file":
             print(f"    [write] {shown(args.get('path', ''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     run_agent_loop(
         system=SYSTEM,

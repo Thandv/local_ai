@@ -142,16 +142,17 @@ def run(
     output_dir = Path(os.path.abspath(Path(output_dir).expanduser()))
     output_dir.mkdir(parents=True, exist_ok=True)
     project = Project(instruction=instruction, output_dir=output_dir)
+    rerun_test_gate = False
 
     if resume_dir:
         for f in checkpoint.get("files", []):
             if f not in project.files_written:
                 project.files_written.append(f)
         if "tester" in completed_stages:
-            # The tester is not re-run on resume; restore its gate result.
-            project.success = bool(checkpoint.get("tester_passed"))
-            if isinstance(checkpoint.get("test_results"), dict):
-                project.test_results = checkpoint["test_results"]
+            # BUILD_LOG.json lives in the output dir, where model-run code can
+            # write it, so the tester's gate result is never restored from it:
+            # the gate itself is re-run (below, inside the sandbox).
+            rerun_test_gate = True
 
     print(f"\n{'='*60}")
     print(f"  Building: {instruction}")
@@ -181,6 +182,10 @@ def run(
     step  = len(completed_stages)
 
     with guard.sandboxed(output_dir, yes_unsafe=yes_unsafe):
+        if rerun_test_gate:
+            print("  Re-running the test gate (results are not trusted from BUILD_LOG.json) …")
+            project.test_results = tester.run_test_gate(project)
+            project.success = project.test_results["status"] == "pass"
         return _run_stages(project, active_stages, step, total, interactive)
 
 

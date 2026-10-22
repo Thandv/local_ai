@@ -114,7 +114,7 @@ Write a research brief covering:
         elif name == "clone_shallow":
             print(f"    [clone]  {shown(args.get('repo_url',''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     project.research = run_agent_loop(
         system=SYSTEM,
