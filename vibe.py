@@ -16,7 +16,9 @@ import glob as glob_module
 import re
 from pathlib import Path
 
-from local_ai.agents.shared.llm import run_tool_loop, set_model, get_model
+from local_ai.agents.shared.llm import (
+    LLMUnavailableError, run_tool_loop, set_model, get_model,
+)
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
 )
@@ -135,7 +137,7 @@ def repos_status() -> str:
     repos = [d.name for d in REPOS_DIR.iterdir() if d.is_dir()]
     return f"{len(repos)} repos: {', '.join(repos)}" if repos else "No repos cloned yet — run: ai-index"
 
-def main():
+def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(prog="vibe", add_help=False)
     parser.add_argument("--model", "-m", default=None)
@@ -194,6 +196,13 @@ def main():
 
         reply = run_agent(messages)
         print(f"\n\nAI:\n{reply}\n")
+
+
+def main() -> None:
+    try:
+        _main()
+    except LLMUnavailableError as e:
+        sys.exit(str(e))  # prints the message to stderr, exit status 1
 
 
 if __name__ == "__main__":

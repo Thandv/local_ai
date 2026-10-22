@@ -45,7 +45,7 @@ TEMPLATES = {
 }
 
 
-def main():
+def _main() -> None:
     parser = argparse.ArgumentParser(
         prog="build-app",
         description="Multi-agent AI app builder — describe an app, get working code.",
@@ -166,6 +166,13 @@ def main():
         skip_designer=args.no_designer,
         interactive=args.interactive,
     )
+
+
+def main() -> None:
+    try:
+        _main()
+    except _llm.LLMUnavailableError as e:
+        sys.exit(str(e))  # prints the message to stderr, exit status 1
 
 
 if __name__ == "__main__":

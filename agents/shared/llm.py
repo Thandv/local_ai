@@ -11,13 +11,18 @@ Both backends stream tokens to stdout and return the same message dict.
 import inspect
 import json
 import os
-import sys
 import time
 import urllib.request
 import urllib.error
 from typing import Any, Callable, Mapping, Optional
 
 ToolHandlers = Mapping[str, Callable[..., str]]
+
+
+class LLMUnavailableError(RuntimeError):
+    """The model backend cannot be used (Ollama unreachable, the anthropic
+    package missing, or no API key). Raised instead of exiting so callers can
+    contain it; each CLI main() turns it into exit status 1."""
 
 # ── Backend selection ─────────────────────────────────────────────────────────
 
@@ -137,11 +142,10 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
             break  # success
         except urllib.error.URLError as e:
             if attempt == retries:
-                print(
-                    f"\n[LLM] Cannot reach Ollama after {retries} attempts — "
+                raise LLMUnavailableError(
+                    f"[LLM] Cannot reach Ollama after {retries} attempts — "
                     f"is it running? (`brew services start ollama`)\n{e}"
-                )
-                sys.exit(1)
+                ) from e
             wait = 2 ** attempt
             print(f"\n[LLM] Connection error (attempt {attempt}/{retries}), retrying in {wait}s …")
             time.sleep(wait)
@@ -214,16 +218,16 @@ def _claude_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
     """Streaming Claude API call. Prints tokens live; returns normalized message dict."""
     try:
         import anthropic
-    except ImportError:
-        print("\n[LLM] anthropic package not installed. Run: pip install anthropic")
-        sys.exit(1)
+    except ImportError as e:
+        raise LLMUnavailableError(
+            "[LLM] anthropic package not installed. Run: pip install anthropic") from e
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        print("\n[LLM] ANTHROPIC_API_KEY not set. Export it to use the Claude backend.")
-        sys.exit(1)
+        raise LLMUnavailableError(
+            "[LLM] ANTHROPIC_API_KEY not set. Export it to use the Claude backend.")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
     system, claude_msgs = _to_claude_messages(messages)
     claude_tools = _openai_tools_to_claude(tools)
 
