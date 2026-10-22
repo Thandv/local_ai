@@ -137,7 +137,10 @@ class CommandLineTests(_PipCase):
                                           "PYTHONSTARTUP": "/outside/x.py"}):
             tools.run_command("pip install six")
         env = self.calls[-1]["env"]
-        self.assertFalse([k for k in env if k.startswith(("PIP_", "PYTHON"))], env)
+        # review9: the one PIP_ variable is the guard's own PIP_CONFIG_FILE=/dev/null.
+        self.assertEqual([k for k in env if k.startswith(("PIP_", "PYTHON"))],
+                         ["PIP_CONFIG_FILE"], env)
+        self.assertEqual(env["PIP_CONFIG_FILE"], os.devnull)
         self.assertEqual(env["VIRTUAL_ENV"], str(self.venv))
 
     def test_still_needs_confirmation_without_yes_unsafe(self) -> None:

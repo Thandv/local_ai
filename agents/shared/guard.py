@@ -722,18 +722,37 @@ _PIP_COMMON = ("--isolated", "--no-input", "--disable-pip-version-check")
 PIP_INDEX_URL = "https://pypi.org/simple"
 _PIP_INSTALL_FIXED = ("--index-url", PIP_INDEX_URL, "--only-binary=:all:")
 _PIP_NAME = re.compile(
-    r"[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9,._-]+\])?"
+    r"(?P<project>[A-Za-z0-9][A-Za-z0-9._-]*)(\[[A-Za-z0-9,._-]+\])?"
     r"((==|>=|<=|~=|!=|<|>)[A-Za-z0-9.*+!_-]+(,(==|>=|<=|~=|!=|<|>)[A-Za-z0-9.*+!_-]+)*)?")
 _PIP_COMMENT = re.compile(r" *#[ -~]*")
+# pip reads a requirement ending in one of these (case-insensitively, even
+# after a version: `foo==1.whl`) as a file relative to its cwd, not a PyPI
+# name (pip 26 utils/filetypes.ARCHIVE_EXTENSIONS, plus the legacy .egg).
+_PIP_ARCHIVE_SUFFIXES = (".whl", ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz",
+                         ".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma", ".egg")
+# PIP_CONFIG_FILE=os.devnull makes pip skip every config file (global, user,
+# and ROOT/.venv/pip.conf, which --isolated alone still loads).
+_PIP_ENV = (("PIP_CONFIG_FILE", os.devnull),)
 REQUIREMENTS_FILE = "requirements.txt"
 _MAX_REQ_BYTES = 1_000_000
 _MAX_PIP_NAMES = 500
 
 
+def _is_pip_name(arg) -> bool:
+    match = isinstance(arg, str) and arg.isascii() and _PIP_NAME.fullmatch(arg)
+    if not match:
+        return False
+    # Both the whole string (`foo==1.whl`) and the project name: pip strips
+    # trailing [extras] before its archive check (`b.zip[x]` is ./b.zip).
+    project = arg[:match.end("project")]
+    return not any(s.lower().endswith(_PIP_ARCHIVE_SUFFIXES) for s in (arg, project))
+
+
 def _pip_name(arg: str, what: str) -> str:
-    if not (isinstance(arg, str) and arg.isascii() and _PIP_NAME.fullmatch(arg)):
+    if not _is_pip_name(arg):
         raise Refused(f"{what} {arg!r} is not a plain PyPI name like `name`, `name[extra]` "
-                      "or `name==1.2,<2` (no options, URLs, paths, markers or spaces)")
+                      "or `name==1.2,<2` (no options, URLs, paths, archive/wheel file "
+                      "names, markers or spaces)")
     return arg
 
 
@@ -764,10 +783,11 @@ def _requirements_names(sandbox: Sandbox, cwd: str) -> list:
     for number, line in enumerate(text.split("\n"), start=1):
         if not line.strip(" ") or _PIP_COMMENT.fullmatch(line):
             continue
-        if not _PIP_NAME.fullmatch(line.strip(" ")):
+        if not _is_pip_name(line.strip(" ")):
             raise Refused(f"{REQUIREMENTS_FILE} line {number} {shown(line)!r} is not a plain "
                           "PyPI name (only names, versions, blank lines and full-line "
-                          "comments are installed; no options, URLs, paths or markers)")
+                          "comments are installed; no options, URLs, paths, archive/wheel "
+                          "file names or markers)")
         names.append(line.strip(" "))
     if not names:
         raise Refused(f"{REQUIREMENTS_FILE} names no packages")
@@ -809,6 +829,7 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
     elif sub == "uninstall":
         fixed.append("--yes")
     return _Plan([python, "-I", "-m", "pip", sub, *fixed, *names], pip_cwd=True,
+                 env_extra=_PIP_ENV,
                  confirm="pip downloads and runs third-party package code")
 
 

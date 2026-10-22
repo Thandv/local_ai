@@ -106,12 +106,16 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   guard reads that one `requirements.txt` itself. It must be plain ASCII with
   `\n` line ends, and every line must be blank, a full-line `#` comment or a
   plain PyPI name (`name`, `name[extra]`, `name==1.2,<2`; no spaces, markers,
-  URLs, paths, hashes or options). Any other line refuses the whole file.
+  URLs, paths, hashes or options, and nothing ending in an archive or wheel
+  extension such as `.whl`, `.zip`, `.tar.gz` or `.egg`, which pip would read
+  as a file). Any other line refuses the whole file.
   The names go to pip as separate arguments:
   `ROOT/.venv/bin/python -I -m pip install --isolated --no-input
   --disable-pip-version-check --index-url https://pypi.org/simple
   --only-binary=:all: <names>`, run in a fresh empty temp dir outside the
-  build, with the scrubbed environment (no `PIP_*` or `PYTHON*` variables).
+  build, with the scrubbed environment (no `PYTHON*` variables, and no `PIP_*`
+  variable except `PIP_CONFIG_FILE=/dev/null`, so pip loads no config file,
+  not even `ROOT/.venv/pip.conf`).
   Wheels only: a package that publishes only an sdist will not install.
   Hash-pinned, editable (`-e .`), URL and local-path installs are not
   available to the model; run those yourself.
