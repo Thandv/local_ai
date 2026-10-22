@@ -729,6 +729,8 @@ _REQ_MARKER = re.compile(r"[A-Za-z0-9_.'\"<>=!~ ()-]+")
 _REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
                 "--only-binary", "--no-binary", "--require-hashes", "--hash",
                 "--config-settings"}
+_INDEX_OPTS = {"-i", "--index-url", "--extra-index-url"}
+_HTTPS_URL = re.compile(r"https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
 _REQ_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--no-binary",
                    "--hash", "--config-settings"}
 
@@ -738,12 +740,26 @@ def _check_local_path(sandbox: Sandbox, base: str, path: str, what: str) -> None
         raise Refused(f"{what} {path!r} must be a plain relative path inside the build dir")
 
 
+_SUBDIR = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
+
+
+def _url_ok(url: str, pattern) -> bool:
+    """An allowed URL whose #subdirectory= (pip joins it onto the unpacked
+    dir unchecked) is a plain relative path with no '..'."""
+    if not pattern.fullmatch(url):
+        return False
+    return all(_SUBDIR.fullmatch(v) and ".." not in v.split("/")
+               for v in re.findall(r"[#&]subdirectory=([^&]*)", url))
+
+
 def _check_pip_spec(sandbox: Sandbox, cwd: str, spec: str, *, editable: bool = False) -> None:
     """One requirement: `name[extras] <specifiers> [; marker]`, `name @ https://...`,
     `git+https://...` (editable), or a plain relative path inside the build dir.
     Everything else (file:, git+file:, other schemes, ';' in paths, ...) is refused."""
     if editable:
         if _REQ_VCS.fullmatch(spec):
+            if not _url_ok(spec, _REQ_VCS):
+                raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
             return
         base, _, extras = spec.partition("[")
         if extras and not re.fullmatch(r"[A-Za-z0-9_.,-]+\]", extras):
@@ -754,11 +770,17 @@ def _check_pip_spec(sandbox: Sandbox, cwd: str, spec: str, *, editable: bool = F
     if sep and not _REQ_MARKER.fullmatch(marker.strip()):
         raise Refused(f"requirement marker {marker!r} is not allowed")
     req = req.strip()
-    if _REQ_NAME_SPEC.fullmatch(req) or _REQ_VCS.fullmatch(req):
+    if _REQ_NAME_SPEC.fullmatch(req):
+        return
+    if _REQ_VCS.fullmatch(req):
+        if not _url_ok(req, _REQ_VCS):
+            raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
         return
     name, at, url = req.partition(" @ ")
     if at and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS, name.strip()) \
             and _REQ_URL.fullmatch(url.strip()):
+        if not _url_ok(url.strip(), _REQ_URL):
+            raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
         return
     if (req.startswith(".") or "/" in req) and _SAFE_PATH.fullmatch(req):
         _check_local_path(sandbox, cwd, req, "requirement path")
@@ -790,6 +812,9 @@ def _join_requirement_lines(text: str) -> list:
     ends a line after a space (pip-compile's hash layout)."""
     lines, current = [], ""
     for raw in text.splitlines():
+        if re.match(r"\s*#", raw) and raw.rstrip().endswith("\\"):
+            # pip never continues a comment line; the checker must not either
+            raise Refused("a comment line may not end with '\\'")
         body = raw[:-1] if raw.endswith(" \\") else raw
         if "\\" in body:
             raise Refused("requirements files may use '\\' only as ' \\' at a line end")
@@ -839,6 +864,8 @@ def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) ->
                 _check_requirements(sandbox, cwd, os.path.join(base, value), depth=depth + 1)
             elif name in ("-e", "--editable"):
                 _check_pip_spec(sandbox, cwd, value, editable=True)
+            elif name in _INDEX_OPTS and not _HTTPS_URL.fullmatch(value):
+                raise Refused(f"index URL {value!r} must be https://")
             elif name not in _REQ_OPTS_OK:
                 raise Refused(f"requirements option {opts[i]!r} is not allowed")
             i += 1
@@ -869,6 +896,8 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
                 _check_requirements(sandbox, cwd, os.path.join(cwd, value), depth=0)
             elif name in ("-e", "--editable"):
                 _check_pip_spec(sandbox, cwd, value, editable=True)
+            elif name in _INDEX_OPTS and not _HTTPS_URL.fullmatch(value):
+                raise Refused(f"index URL {value!r} must be https://")
         elif a.startswith("-"):
             raise Refused(f"pip option {a!r} is not allowed (installs must stay in "
                           f"{VENV_DIR})")

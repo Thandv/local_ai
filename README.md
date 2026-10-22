@@ -106,8 +106,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   requirements file, must match a strict allowlist: `name[extras]` with
   version specifiers and an optional marker, `name @ https://...`,
   `git+https://...`, or a plain relative path inside the build. `file:` URLs,
-  other schemes, `${VAR}`, unusual encodings and backslashes other than a
-  trailing ` \` are refused rather than interpreted. `npm install` runs only next
+  other schemes, `${VAR}`, unusual encodings, backslashes other than a
+  trailing ` \`, a `#subdirectory=` that leaves the archive, and non-https
+  index URLs are refused rather than interpreted. `npm install` runs only next
   to a package.json in the working dir; `-g`, `-C`, `--global`, `--prefix`
   and similar options are refused in any npm command. Both always need the confirmation (or
   `--yes-unsafe`), so a build with no TTY installs nothing.
