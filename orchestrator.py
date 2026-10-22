@@ -12,16 +12,22 @@ Supports:
 import re
 import time
 import json
+import traceback
 from pathlib import Path
 from datetime import datetime
 
-from local_ai.agents.shared.memory import Project
+from local_ai.agents.shared.llm import LLMUnavailableError
+from local_ai.agents.shared.memory import BUILD_LOG, Project, read_build_log
 from local_ai.agents import (
     researcher, architect, coder, tester, reviewer,
     designer, debugger, devops, migrator, auditor, packager,
 )
 
 BUILDS_DIR = Path.home() / "builds"
+
+# A build cannot be judged without these; if one raises, the pipeline stops
+# with verdict FAILED. Every other stage is optional: it warns and continues.
+REQUIRED_STAGES = frozenset({"architect", "coder", "tester"})
 
 
 def _slugify(text: str) -> str:
@@ -60,21 +66,11 @@ def _confirm_plan(project: Project) -> bool:
 
 
 def _load_checkpoint(output_dir: Path) -> dict:
-    log_path = output_dir / "BUILD_LOG.json"
-    if log_path.exists():
-        try:
-            return json.loads(log_path.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+    return read_build_log(output_dir)
 
 
 def _save_checkpoint(project: Project, stage: str):
-    log_path = project.output_dir / "BUILD_LOG.json"
-    try:
-        log = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else {}
-    except Exception:
-        log = {}
+    log = read_build_log(project.output_dir)
     completed = log.get("completed_stages", [])
     if stage not in completed:
         completed.append(stage)
@@ -86,7 +82,7 @@ def _save_checkpoint(project: Project, stage: str):
         "packaged":         project.packaged,
         "completed_stages": completed,
     })
-    log_path.write_text(json.dumps(log, indent=2), encoding="utf-8")
+    (project.output_dir / BUILD_LOG).write_text(json.dumps(log, indent=2), encoding="utf-8")
 
 
 def run(
@@ -181,10 +177,17 @@ def run(
             project = agent_fn(project)
             _save_checkpoint(project, name)
         except Exception as e:
-            print(f"\n  [ERROR in {label}]: {e}")
-            import traceback
+            fatal = name in REQUIRED_STAGES or isinstance(e, LLMUnavailableError)
+            project.record_stage_error(name, e, fatal=fatal)
             traceback.print_exc()
-            print("  Continuing to next stage …\n")
+            if fatal:
+                print(f"\n  [FAILED in {label}]: {e}")
+                print("  Stopping the pipeline: later stages cannot run without this one.\n")
+                project.save_log()
+                print(project.summary())
+                return project
+            print(f"\n  [WARNING] {label} stage raised: {e}")
+            print("  Recorded in BUILD_LOG.json stage_errors; continuing to next stage …\n")
         elapsed = time.time() - t0
         print(f"  Completed in {elapsed:.1f}s")
 

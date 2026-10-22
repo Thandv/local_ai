@@ -15,7 +15,8 @@ from unittest import mock
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
 from local_ai import orchestrator
-from local_ai.agents.shared.memory import Project
+from local_ai.agents.shared.llm import LLMUnavailableError
+from local_ai.agents.shared.memory import Project, Verdict
 
 STAGES = ["designer", "researcher", "architect", "migrator", "coder", "debugger",
           "tester", "auditor", "devops", "reviewer", "packager"]
@@ -138,3 +139,110 @@ class ResumeTests(support.GuardedTestCase):
         project = self._run_resume("new invented idea")
         self.assertEqual(self.called, [])
         self.assertEqual(project.instruction, "new invented idea")
+
+
+class StageFailureTests(support.GuardedTestCase):
+    """A required stage (architect, coder, tester) or an unavailable model
+    stops the pipeline with verdict FAILED; an optional stage only warns."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self._tmp.name)
+        self.called: list[str] = []
+        self.failing: dict[str, BaseException] = {}
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+        super().tearDown()
+
+    def _fake(self, name: str) -> Callable[[Project], Project]:
+        def stage(project: Project) -> Project:
+            self.called.append(name)
+            if name in self.failing:
+                raise self.failing[name]
+            return project
+        return stage
+
+    def _run(self, **kwargs: object) -> tuple[Project, str]:
+        out = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name in STAGES:
+                module = getattr(orchestrator, name)
+                stack.enter_context(mock.patch.object(module, "run", self._fake(name)))
+            stack.enter_context(contextlib.redirect_stdout(out))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            project = orchestrator.run(**kwargs)
+        return project, out.getvalue()
+
+    def _build(self) -> tuple[Project, str]:
+        return self._run(instruction="invented habit tracker", output_dir=self.out)
+
+    def _log(self) -> dict:
+        return json.loads((self.out / "BUILD_LOG.json").read_text(encoding="utf-8"))
+
+    def test_required_stage_raising_stops_with_failed(self) -> None:
+        for stage in ("architect", "coder", "tester"):
+            with self.subTest(stage=stage):
+                self.called = []
+                self.failing = {stage: RuntimeError(f"invented {stage} crash")}
+                project, out = self._build()
+                self.assertEqual(self.called, STAGES[:STAGES.index(stage) + 1])
+                self.assertEqual(project.verdict, Verdict.FAILED)
+                self.assertFalse(project.success)
+                self.assertIn("FAILED", out)
+                log = self._log()
+                self.assertEqual(log["verdict"], "FAILED")
+                self.assertFalse(log["success"])
+                self.assertEqual(log["stage_errors"][-1]["stage"], stage)
+                self.assertIn(f"invented {stage} crash", log["stage_errors"][-1]["error"])
+                self.assertTrue(log["stage_errors"][-1]["fatal"])
+                self.assertNotIn(stage, log["completed_stages"])
+
+    def test_optional_stage_raising_warns_and_continues(self) -> None:
+        self.failing = {"reviewer": RuntimeError("invented reviewer crash")}
+        project, out = self._build()
+        self.assertEqual(self.called, STAGES)
+        self.assertIn("WARNING", out)
+        self.assertIn("invented reviewer crash", out)
+        self.assertNotEqual(project.verdict, Verdict.FAILED)
+        log = self._log()
+        self.assertEqual(log["verdict"], "INCOMPLETE")  # fakes write no PLAN.md
+        self.assertEqual(len(log["stage_errors"]), 1)
+        self.assertEqual(log["stage_errors"][0]["stage"], "reviewer")
+        self.assertFalse(log["stage_errors"][0]["fatal"])
+
+    def test_unavailable_model_in_optional_stage_stops_with_failed(self) -> None:
+        self.failing = {"designer": LLMUnavailableError("invented: backend is down")}
+        project, _ = self._build()
+        self.assertEqual(self.called, ["designer"])
+        self.assertEqual(project.verdict, Verdict.FAILED)
+        log = self._log()
+        self.assertEqual(log["verdict"], "FAILED")
+        self.assertIn("backend is down", log["stage_errors"][0]["error"])
+
+    def test_keyboard_interrupt_and_system_exit_propagate(self) -> None:
+        for exc in (KeyboardInterrupt(), SystemExit(3)):
+            with self.subTest(exc=type(exc).__name__):
+                self.called = []
+                self.failing = {"coder": exc}
+                with self.assertRaises(type(exc)):
+                    self._build()
+                self.assertNotEqual(self._log().get("verdict"), "FAILED")
+
+    def test_resuming_a_finished_build_runs_no_stage(self) -> None:
+        self._build()
+        self.assertEqual(self.called, STAGES)
+        self.assertEqual(self._log()["completed_stages"], STAGES)
+        self.called = []
+        self._run(instruction="", resume_dir=self.out)
+        self.assertEqual(self.called, [])
+        self.assertEqual(self._log()["completed_stages"], STAGES)
+
+    def test_resuming_a_failed_build_retries_the_failed_stage(self) -> None:
+        self.failing = {"coder": RuntimeError("invented coder crash")}
+        self._build()
+        self.failing = {}
+        self.called = []
+        project, _ = self._run(instruction="", resume_dir=self.out)
+        self.assertEqual(self.called, STAGES[STAGES.index("coder"):])
+        self.assertNotEqual(project.verdict, Verdict.FAILED)
