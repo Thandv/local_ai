@@ -15,16 +15,17 @@ import subprocess
 import glob as glob_module
 import re
 from pathlib import Path
-from typing import Optional
 
 from local_ai.agents.shared.llm import run_tool_loop, set_model, get_model
+from local_ai.agents.shared.tools import (
+    HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 REPOS_DIR   = Path.home() / ".local-ai" / "repos"
 RAG_SNIPPETS = 5      # max snippets to inject per query
 SNIPPET_LINES = 40    # lines per snippet
-MAX_OUTPUT   = 8000
 
 SYSTEM_PROMPT = """You are an expert vibe-coder — you turn ideas into complete, working software.
 
@@ -103,151 +104,23 @@ def grep_repos(keywords: list[str], max_snippets: int = RAG_SNIPPETS) -> str:
 
     return "\n\n---\n\n".join(snippets)
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
+# ── Tools (the shared implementations in agents/shared/tools.py) ──────────────
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the contents of a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file, creating parent directories as needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files matching a glob pattern.",
-            "parameters": {
-                "type": "object",
-                "properties": {"pattern": {"type": "string"}},
-                "required": ["pattern"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "description": "Run a shell command and return its output.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                    "working_dir": {"type": "string"}
-                },
-                "required": ["command"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_code",
-            "description": "Search for a text pattern across project files.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string"},
-                    "directory": {"type": "string"}
-                },
-                "required": ["pattern"]
-            }
-        }
-    }
-]
-
-# ── Tool implementations ───────────────────────────────────────────────────────
-
-def read_file(path: str) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"File not found: {path}"
-    try:
-        content = p.read_text(encoding="utf-8")
-        if len(content) > MAX_OUTPUT:
-            content = content[:MAX_OUTPUT] + f"\n[truncated — {len(content)} total chars]"
-        return content
-    except Exception as e:
-        return f"Error: {e}"
-
-def write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    print(f"    wrote {path}")
-    return f"Written: {path}"
-
-def list_files(pattern: str) -> str:
-    matches = glob_module.glob(pattern, recursive=True)
-    return "\n".join(sorted(matches)) if matches else f"No files: {pattern}"
-
-def run_command(command: str, working_dir: Optional[str] = None) -> str:
-    cwd = Path(working_dir).expanduser() if working_dir else Path.cwd()
-    print(f"\n    $ {command}")
-    try:
-        result = subprocess.run(
-            command, shell=True, cwd=cwd,
-            capture_output=True, text=True, timeout=120
-        )
-        out = (result.stdout + result.stderr).strip()
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Timed out after 120s"
-    except Exception as e:
-        return f"Error: {e}"
-
-def search_code(pattern: str, directory: str = ".") -> str:
-    try:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*.py", "--include=*.js", "--include=*.ts",
-             "--include=*.jsx", "--include=*.tsx", "--include=*.json", "--include=*.css",
-             pattern, directory],
-            capture_output=True, text=True, timeout=10
-        )
-        out = result.stdout
-        if not out.strip():
-            return f"No matches for '{pattern}'"
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out
-    except Exception as e:
-        return f"Error: {e}"
-
+TOOLS = [READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE]
 TOOL_HANDLERS = {
-    "read_file": read_file,
-    "write_file": write_file,
-    "list_files": list_files,
-    "run_command": run_command,
-    "search_code": search_code,
+    name: HANDLERS[name]
+    for name in ("read_file", "write_file", "list_files", "run_command", "search_code")
 }
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
 def _show_call(name: str, args: dict) -> None:
-    print(f"\n  [{name}]", end="")
+    if name == "run_command":
+        print(f"\n    $ {args.get('command', '')}")
+    elif name == "write_file":
+        print(f"\n    write {args.get('path', '')}")
+    else:
+        print(f"\n  [{name}]", end="")
 
 
 def run_agent(messages: list) -> str:

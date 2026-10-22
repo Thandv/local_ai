@@ -17,6 +17,7 @@ from unittest import mock
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
 from local_ai import agent, vibe
+from local_ai.agents.shared import tools
 
 REPLS: list[ModuleType] = [agent, vibe]
 RUNAWAY_CAP = 100  # replies before the fake model runs dry (StopIteration)
@@ -145,3 +146,30 @@ class ReplLoopBoundTests(ReplTestCase):
                     self.assertTrue(tool_msgs[0].startswith(
                         "Error: invalid arguments for write_file:"), tool_msgs)
                 self.assertEqual(list(self.dir.iterdir()), [])
+
+
+class ReplToolSourceTests(support.GuardedTestCase):
+    """The REPLs use the one tool implementation in agents/shared/tools.py."""
+
+    REPL_TOOLS = ["read_file", "write_file", "list_files", "run_command", "search_code"]
+
+    def test_handlers_and_schemas_are_the_shared_ones(self) -> None:
+        shared_schemas = {t["function"]["name"]: t for t in
+                          (tools.READ_FILE, tools.WRITE_FILE, tools.LIST_FILES,
+                           tools.RUN_COMMAND, tools.SEARCH_CODE)}
+        for module in REPLS:
+            with self.subTest(module=module.__name__):
+                self.assertEqual(sorted(module.TOOL_HANDLERS), sorted(self.REPL_TOOLS))
+                for name, handler in module.TOOL_HANDLERS.items():
+                    self.assertIs(handler, tools.HANDLERS[name])
+                self.assertEqual(len(module.TOOLS), len(self.REPL_TOOLS))
+                for schema in module.TOOLS:
+                    self.assertIs(schema, shared_schemas[schema["function"]["name"]])
+
+    def test_no_own_tool_code_left_in_the_repls(self) -> None:
+        for module in REPLS:
+            with self.subTest(module=module.__name__):
+                source = Path(module.__file__).read_text(encoding="utf-8")
+                for marker in ("shell=True", "json.loads", "def run_command",
+                               "def write_file", "def read_file", "handler(**"):
+                    self.assertNotIn(marker, source)
