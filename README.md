@@ -4,7 +4,8 @@ A stdlib-only multi-agent "build an app" pipeline (`build-app`) and a `vibe`
 coding REPL that run on a local Ollama model (or the Claude API).
 
 **Status: prototype.** Read [Safety](#safety) before running it: the model can
-run shell commands on this machine, and the guard for that has not landed yet.
+run commands on this machine. A guard limits which ones and where, but an
+allowlisted test runner still runs model-written code.
 
 ## What it is
 
@@ -63,26 +64,53 @@ refer to this command.
 
 ## Safety
 
-**This tool CAN run commands on this machine.** Today nothing guards that:
+**This tool CAN run commands on this machine**, with your user's permissions.
+Every file and command tool goes through one guard, `agents/shared/guard.py`
+(the handlers are in `agents/shared/tools.py`):
 
-- The `run_command` tool (`agents/shared/tools.py`) runs whatever command the
-  model sends through the shell (`shell=True`), with your user's permissions,
-  no allowlist and no confirmation prompt. `build-app`'s Architect, Migrator,
-  Coder, Debugger, Tester, Auditor and Packager stages have it, and so do
-  `vibe` and `agent`.
-- `write_file` and `read_file` accept any path your user can reach; they are
-  not confined to the output directory.
-- Dependencies are installed by whatever command the model chooses (e.g.
-  `pip install -r requirements.txt`), not into a per-build venv.
-- The Researcher's text, which includes READMEs and code fetched from GitHub,
-  is pasted into the Architect's and Migrator's prompts as-is, not marked as
-  untrusted data.
+- **Confinement.** Each run has one allowed root: the output dir for
+  `build-app`, the current directory for `vibe` and `agent`. `write_file`,
+  `read_file`, `list_files` and `search_code` refuse paths outside it,
+  including `..`, absolute paths and symlinks (paths are opened one component
+  at a time with `O_NOFOLLOW`, so a symlink swapped in later is refused too).
+  `write_file` also refuses hard links and anything under `.git`, `.venv`,
+  `node_modules` or `.npmrc` (case-insensitively). With no root configured,
+  every tool refuses.
+- **No shell.** `run_command` splits the command with `shlex` and runs it with
+  `shell=False`, in a working dir inside the root, with a scrubbed environment
+  (API keys, `PYTHON*`, `NODE_OPTIONS`, `GIT_*` and `npm_config_*` are not
+  passed on). Pipes, redirects, `&&`, `;`, `$(...)` and backticks are refused.
+- **Allowlist.** These run without asking, when every path argument stays in
+  the root: `python3 -m pytest`, `python3 -m unittest`, `python3 -m py_compile`,
+  `pytest`, `python3 -m venv .venv`, `node <script>` and `node --test`, `ls`,
+  `cat`, `git init|status|diff|add|commit -m` (with hooks, fsmonitor, external
+  diff and pager turned off), and `npm test` / `npm run <name>` when that
+  package.json script is one plain test-runner command (jest, vitest, mocha,
+  ava, tap or `node <script>`) with no pre/post hook. Options that write or
+  read elsewhere (`pytest --basetemp`, `git -c`, `git diff --output`,
+  `node -e`, `python -c`, ...) are not on it.
+- **Confirmation.** Anything else is shown to you with a `y/N` prompt when
+  stdin is a TTY, and refused when it is not. `--yes-unsafe` on the
+  `build-app`, `vibe` or `agent` command line skips that prompt; the model
+  cannot set it.
+- **Installs.** `pip` runs only as `ROOT/.venv/bin/python -m pip` (the model
+  creates the venv with `python3 -m venv .venv`), never the PATH interpreter;
+  options that install elsewhere (`--user`, `--target`, `--prefix`, ...) are
+  refused. `npm install` runs only next to a package.json in the working dir,
+  without `-g` or `--prefix`. Both always need the confirmation (or
+  `--yes-unsafe`), so a build with no TTY installs nothing.
+- **Untrusted text.** `peek_readme`, `clone_shallow`, `search_github` and the
+  repo snippets are wrapped as `<untrusted-data>` blocks, and the Researcher's
+  brief is wrapped again when the Architect and Migrator receive it. The
+  Architect has no `run_command`; the Migrator's goes through the guard.
 
-A guarded runner (a `shell=False` allowlist, confirmation on a TTY,
-output-dir confinement, per-build venv installs and untrusted-data wrapping)
-is planned but not merged. Until it is, run `build-app`, `vibe` and `agent`
-only in a throwaway directory, VM or container with nothing you would mind
-losing.
+**What the guard does not do.** An allowlisted test runner (pytest, unittest,
+`npm test`, `node <script>`) runs code the model wrote, and that code can do
+anything your user can, including reach the network or write outside the
+root. The guard decides which program starts and where, not what it does
+next. Text from the Researcher can also reach later stages through `PLAN.md`.
+Run `build-app`, `vibe` and `agent` in a throwaway directory, VM or container,
+ideally with the network off.
 
 What is in place: every agent tool loop, in `build-app` and in both REPLs,
 runs on one shared loop (`run_tool_loop` in `agents/shared/llm.py`). It stops
@@ -116,7 +144,7 @@ the Tester agent's own text and looks for pass/fail words (e.g. "passed",
 "ok", "FAILED"), so a failing run can be reported as passing. (A Tester
 loop that hits the 20-round limit counts as not passing.) A gate based on
 the real exit code of the project's test command is planned; it needs the
-guarded runner above.
+guarded runner from [Safety](#safety).
 
 ## Tests
 

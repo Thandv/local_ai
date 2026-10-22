@@ -20,8 +20,9 @@ from pathlib import Path
 from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
+from local_ai.agents.shared import guard
 from local_ai.agents.shared.tools import (
-    HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
+    HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE, wrap_untrusted,
 )
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -142,11 +143,15 @@ def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(prog="vibe", add_help=False)
     parser.add_argument("--model", "-m", default=None)
+    parser.add_argument("--yes-unsafe", action="store_true")
     args, _ = parser.parse_known_args()
     if args.model:
         set_model(args.model)
 
     project_dir = Path.cwd()
+    # File and command tools are confined to the current directory; only the
+    # person's --yes-unsafe flag skips the confirmation for unlisted commands.
+    guard.activate(project_dir, yes_unsafe=args.yes_unsafe)
     print("\n  Local Vibe Coder")
     print(f"  Model  : {get_model()}")
     print(f"  Project: {project_dir}")
@@ -188,7 +193,7 @@ def _main() -> None:
                     "role": "system",
                     "content": (
                         f"REFERENCE CODE from open-source repos (keywords: {', '.join(keywords)}):\n\n"
-                        + context[:6000]
+                        + wrap_untrusted(context[:6000], "reference repos")
                     )
                 })
 

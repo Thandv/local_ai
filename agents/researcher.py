@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import (
-    grep_repos, SEARCH_GITHUB, PEEK_README, CLONE_SHALLOW, HANDLERS,
+    grep_repos, SEARCH_GITHUB, PEEK_README, CLONE_SHALLOW, HANDLERS, wrap_untrusted,
 )
 from .shared.memory import Project
 
@@ -75,8 +75,8 @@ def run(project: Project) -> Project:
 
     task = f"""Instruction: {project.instruction}
 
-Reference code patterns found in the curated repos:
-{repo_patterns}{sparse_note}
+Reference code patterns found in the curated and discovered repos:
+{wrap_untrusted(repo_patterns, "grep_repos")}{sparse_note}
 
 Write a research brief covering:
 ## Tech Stack

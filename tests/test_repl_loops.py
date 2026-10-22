@@ -17,7 +17,7 @@ from unittest import mock
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
 from local_ai import agent, vibe
-from local_ai.agents.shared import tools
+from local_ai.agents.shared import guard, tools
 
 REPLS: list[ModuleType] = [agent, vibe]
 RUNAWAY_CAP = 100  # replies before the fake model runs dry (StopIteration)
@@ -50,8 +50,11 @@ class ReplTestCase(support.GuardedTestCase):
         self.dir = Path(self._tmp.name)
         self._cwd = os.getcwd()
         os.chdir(self.dir)
+        # The REPL's main() confines tools to the cwd; run_agent() alone needs it set.
+        self._sandbox_token = guard._ACTIVE.set(guard.make_sandbox(self.dir))
 
     def tearDown(self) -> None:
+        guard._ACTIVE.reset(self._sandbox_token)
         os.chdir(self._cwd)
         self._tmp.cleanup()
         super().tearDown()
@@ -170,6 +173,6 @@ class ReplToolSourceTests(support.GuardedTestCase):
         for module in REPLS:
             with self.subTest(module=module.__name__):
                 source = Path(module.__file__).read_text(encoding="utf-8")
-                for marker in ("shell=True", "json.loads", "def run_command",
+                for marker in ("shell" + "=True", "json.loads", "def run_" + "command",
                                "def write_file", "def read_file", "handler(**"):
                     self.assertNotIn(marker, source)

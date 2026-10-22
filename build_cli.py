@@ -105,6 +105,14 @@ def _main() -> None:
         help="Error message to pass when using --fix",
     )
 
+    parser.add_argument(
+        "--yes-unsafe",
+        action="store_true",
+        help=("Run model commands that are not on the allowlist WITHOUT asking. "
+              "Only for a throwaway machine or container. Paths stay confined to the "
+              "output dir and pip/npm installs still need the build venv."),
+    )
+
     # ── Stage skips ────────────────────────────────────────────────────────────
     parser.add_argument("--no-review",   action="store_true", help="Skip Reviewer agent")
     parser.add_argument("--no-debug",    action="store_true", help="Skip Debugger agent")
@@ -123,6 +131,7 @@ def _main() -> None:
         orchestrator.fix(
             build_dir=Path(args.fix).expanduser(),
             error=args.error,
+            yes_unsafe=args.yes_unsafe,
         )
         return
 
@@ -139,6 +148,7 @@ def _main() -> None:
             skip_package=args.no_package,
             skip_designer=args.no_designer,
             interactive=args.interactive,
+            yes_unsafe=args.yes_unsafe,
         )
         _exit_if_failed(project)
         return
@@ -167,6 +177,7 @@ def _main() -> None:
         skip_package=args.no_package,
         skip_designer=args.no_designer,
         interactive=args.interactive,
+        yes_unsafe=args.yes_unsafe,
     )
     _exit_if_failed(project)
 

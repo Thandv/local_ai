@@ -20,7 +20,10 @@ Your job:
 4. If tests fail, diagnose the failures, fix the source code or tests, and re-run
 5. Repeat until all tests pass (max {max} attempts)
 
-For Python projects: use pytest. Write tests in a tests/ folder.
+For Python projects: use pytest. Write tests in a tests/ folder. Run them with
+`python3 -m pytest -q` (or `python3 -m unittest discover -v`); one command per
+call, no shell. Packages go into the build's .venv (`python3 -m venv .venv`,
+then `pip install pytest`); installs need the person's confirmation.
 For JS/TS projects: use the framework's built-in test runner (Jest/Vitest).
 For APIs: test each endpoint with realistic requests.
 

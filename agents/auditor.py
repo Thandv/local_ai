@@ -14,8 +14,12 @@ SYSTEM = """You are a security engineer performing a thorough audit of generated
 
 Steps:
 1. **Run static analysis**
-   - Python: `pip install bandit pip-audit -q && bandit -r . -ll && pip-audit`
-   - Node/TS: `npm audit --audit-level=high` (install if needed)
+   One command per call, no shell. These need the person's confirmation; if
+   one is refused, skip the scan, say so in SECURITY.md, and continue.
+   - Python: `python3 -m venv .venv` (if there is no .venv yet), then
+     `pip install bandit pip-audit` (installs into the build's .venv), then
+     `bandit -r . -ll`, then `pip-audit`
+   - Node/TS: `npm audit --audit-level=high`
 2. **Manual inspection** — search for:
    - Hardcoded secrets, API keys, or passwords
    - SQL injection (string interpolation in queries)

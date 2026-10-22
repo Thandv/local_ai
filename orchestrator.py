@@ -9,6 +9,7 @@ Supports:
   fix()        Run Debugger on an existing build directory
 """
 
+import os
 import re
 import time
 import json
@@ -16,6 +17,7 @@ import traceback
 from pathlib import Path
 from datetime import datetime
 
+from local_ai.agents.shared import guard
 from local_ai.agents.shared.llm import LLMUnavailableError
 from local_ai.agents.shared.memory import BUILD_LOG, Project, read_build_log
 from local_ai.agents import (
@@ -100,6 +102,7 @@ def run(
     skip_audit: bool = False,
     skip_package: bool = False,
     resume_dir: Path = None,
+    yes_unsafe: bool = False,
 ) -> Project:
     """
     Run the full pipeline for a given instruction.
@@ -115,6 +118,8 @@ def run(
         skip_audit:     Skip the Auditor agent
         skip_package:   Skip the Packager agent
         resume_dir:     Resume a previous build from this directory
+        yes_unsafe:     The person's --yes-unsafe flag: run commands that are not
+                        on the allowlist without asking (never set by a model)
     Returns:
         Completed Project object
     """
@@ -132,6 +137,9 @@ def run(
             output_dir = BUILDS_DIR / _slugify(instruction)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Every model tool call in this build is confined to the output dir.
+    output_dir = Path(os.path.abspath(Path(output_dir).expanduser()))
+    output_dir.mkdir(parents=True, exist_ok=True)
     project = Project(instruction=instruction, output_dir=output_dir)
 
     if resume_dir:
@@ -169,6 +177,12 @@ def run(
     total = len(active_stages) + len(completed_stages)
     step  = len(completed_stages)
 
+    with guard.sandboxed(output_dir, yes_unsafe=yes_unsafe):
+        return _run_stages(project, active_stages, step, total, interactive)
+
+
+def _run_stages(project: Project, active_stages: list, step: int, total: int,
+                interactive: bool) -> Project:
     for name, agent_fn in active_stages:
         step += 1
         label = name.capitalize()
@@ -203,9 +217,9 @@ def run(
     return project
 
 
-def fix(build_dir: Path, error: str) -> Project:
+def fix(build_dir: Path, error: str, yes_unsafe: bool = False) -> Project:
     """Run only the Debugger on an existing build directory with a known error."""
-    build_dir = Path(build_dir).expanduser()
+    build_dir = Path(os.path.abspath(Path(build_dir).expanduser()))
     checkpoint = _load_checkpoint(build_dir)
     instruction = checkpoint.get("instruction", "existing project")
 
@@ -218,7 +232,8 @@ def fix(build_dir: Path, error: str) -> Project:
     print(f"\n  Fixing: {build_dir}")
     _header("Debugger (fix mode)")
     t0 = time.time()
-    project = debugger.run(project)
+    with guard.sandboxed(build_dir, yes_unsafe=yes_unsafe):
+        project = debugger.run(project)
     print(f"  Completed in {time.time() - t0:.1f}s")
 
     project.save_log()
