@@ -155,3 +155,69 @@ class RunAgentLoopBadArgsTests(support.GuardedTestCase):
         self.assertEqual(self.written, [("a.py", "x")])
         self.assertEqual(self._tool_messages(fake.sent[1]), ["Written: a.py"])
         self.assertEqual(self.seen_args, ["a.py"])
+
+
+class ReviewFollowUpLoopTests(support.GuardedTestCase):
+    """Tool-loop details found by the independent review."""
+
+    def setUp(self) -> None:
+        self.written: list[tuple[str, str]] = []
+
+        def write_file(path: str, content: str) -> str:
+            self.written.append((path, content))
+            return f"Written: {path}"
+
+        self.handlers = {"write_file": write_file}
+
+    def _loop(self, fake: ScriptedChat, messages: list, **kwargs: Any) -> str:
+        with mock.patch.object(llm, "chat", fake), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return llm.run_tool_loop(messages, [], self.handlers, **kwargs)
+
+    def test_wrong_typed_string_argument_is_an_error_result(self) -> None:
+        result = llm.dispatch_tool_call(
+            "write_file", {"path": "package.json", "content": {"name": "x"}},
+            self.handlers)
+        self.assertEqual(result, "Error: invalid arguments for write_file: "
+                                 "content must be a string, got dict")
+        self.assertEqual(self.written, [])
+
+    def test_tool_use_id_is_forwarded(self) -> None:
+        call = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "tu1", "function": {"name": "write_file",
+                                       "arguments": {"path": "a", "content": "b"}}}]}
+        fake = ScriptedChat([call, _text("done")])
+        self._loop(fake, [{"role": "user", "content": "go"}])
+        tool_msgs = [m for m in fake.sent[1] if m["role"] == "tool"]
+        self.assertEqual(tool_msgs, [{"role": "tool", "content": "Written: a",
+                                      "tool_use_id": "tu1"}])
+
+    def test_no_progress_answers_every_call_before_the_note_and_keeps_final(self) -> None:
+        # The third identical call trips the detector; the call after it in
+        # the same message must still get a (skipped) result.
+        same = {"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"s{i}", "function": {"name": "write_file",
+                                         "arguments": {"path": "same", "content": "x"}}}
+            for i in range(3)] + [
+            {"id": "late", "function": {"name": "write_file",
+                                        "arguments": {"path": "late", "content": "z"}}}]}
+        fake = ScriptedChat([same, _text("summary")])
+        messages: list = [{"role": "user", "content": "go"}]
+        self.assertEqual(self._loop(fake, messages), "summary")
+        roles = [(m["role"], m.get("tool_use_id")) for m in messages]
+        self.assertEqual(roles, [
+            ("user", None), ("assistant", None),
+            ("tool", "s0"), ("tool", "s1"), ("tool", "s2"), ("tool", "late"),
+            ("user", None), ("assistant", None),
+        ])
+        self.assertTrue(messages[5]["content"].startswith("Skipped"))
+        self.assertIn("[loop guard]", messages[6]["content"])
+        self.assertEqual(messages[-1]["content"], "summary")
+        self.assertNotIn(("late", "z"), self.written)
+
+    def test_round_limit_notice_is_recognisable(self) -> None:
+        fake = ScriptedChat([_tool_call("write_file", {"path": f"p{i}", "content": "c"})
+                             for i in range(3)])
+        reply = self._loop(fake, [{"role": "user", "content": "go"}], max_rounds=3)
+        self.assertTrue(llm.stopped_at_round_limit(reply))
+        self.assertFalse(llm.stopped_at_round_limit("all tests passed"))

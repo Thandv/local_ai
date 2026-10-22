@@ -71,6 +71,7 @@ def _load_checkpoint(output_dir: Path) -> dict:
 
 def _save_checkpoint(project: Project, stage: str):
     log = read_build_log(project.output_dir)
+    log.pop("verdict", None)  # only save_log() at the end of a run sets it
     completed = log.get("completed_stages", [])
     if stage not in completed:
         completed.append(stage)
@@ -134,6 +135,9 @@ def run(
         for f in checkpoint.get("files", []):
             if f not in project.files_written:
                 project.files_written.append(f)
+        if "tester" in completed_stages:
+            # The tester's gate result is not re-run on resume; restore it.
+            project.success = bool(checkpoint.get("success"))
 
     print(f"\n{'='*60}")
     print(f"  Building: {instruction}")

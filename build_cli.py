@@ -18,6 +18,7 @@ from pathlib import Path
 
 from local_ai import orchestrator
 from local_ai.agents.shared import llm as _llm
+from local_ai.agents.shared.memory import Project, Verdict
 
 # Canned preambles that guide the pipeline for common app shapes
 TEMPLATES = {
@@ -128,7 +129,7 @@ def _main() -> None:
     # ── --resume mode ─────────────────────────────────────────────────────────
     if args.resume:
         instruction = " ".join(args.instruction) if args.instruction else ""
-        orchestrator.run(
+        project = orchestrator.run(
             instruction=instruction,
             resume_dir=Path(args.resume).expanduser(),
             skip_review=args.no_review,
@@ -139,6 +140,7 @@ def _main() -> None:
             skip_designer=args.no_designer,
             interactive=args.interactive,
         )
+        _exit_if_failed(project)
         return
 
     # ── Normal build ──────────────────────────────────────────────────────────
@@ -155,7 +157,7 @@ def _main() -> None:
 
     output_dir = Path(args.out).expanduser() if args.out else None
 
-    orchestrator.run(
+    project = orchestrator.run(
         instruction=instruction,
         output_dir=output_dir,
         skip_review=args.no_review,
@@ -166,6 +168,12 @@ def _main() -> None:
         skip_designer=args.no_designer,
         interactive=args.interactive,
     )
+    _exit_if_failed(project)
+
+
+def _exit_if_failed(project: Project) -> None:
+    if project.verdict is Verdict.FAILED:
+        sys.exit(f"build-app: FAILED — {project.success_reason}")  # exit status 1
 
 
 def main() -> None:

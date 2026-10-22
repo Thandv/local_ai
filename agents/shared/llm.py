@@ -21,6 +21,10 @@ from typing import Any, Callable, Mapping, Optional
 ToolHandlers = Mapping[str, Callable[..., str]]
 
 
+# run_tool_loop() returns text starting with this when it hits max_rounds.
+ROUND_LIMIT_NOTICE = "[agent] stopped after"
+
+
 class LLMUnavailableError(RuntimeError):
     """The model backend cannot be used (Ollama unreachable, the anthropic
     package missing, or no API key). Raised instead of exiting so callers can
@@ -325,8 +329,9 @@ def _decode_tool_args(raw_args: Any) -> tuple[Optional[dict], str]:
 def dispatch_tool_call(name: str, raw_args: Any, handlers: ToolHandlers) -> str:
     """Run one model-requested tool call and return the tool result text.
 
-    A malformed call (unknown tool, arguments that are not a JSON object, or
-    that do not bind to the handler's signature) becomes an error result for
+    A malformed call (unknown tool, arguments that are not a JSON object, that
+    do not bind to the handler's signature, or a non-string value for a `str`
+    parameter) becomes an error result for
     the model instead of an exception, so one bad call cannot kill a stage.
     Exceptions raised inside the handler body still propagate.
     """
@@ -336,10 +341,15 @@ def dispatch_tool_call(name: str, raw_args: Any, handlers: ToolHandlers) -> str:
     args, problem = _decode_tool_args(raw_args)
     if args is None:
         return f"Error: invalid arguments for {name}: {problem}"
+    signature = inspect.signature(handler)
     try:
-        inspect.signature(handler).bind(**args)
+        signature.bind(**args)
     except TypeError as e:
         return f"Error: invalid arguments for {name}: {e}"
+    for key, value in args.items():
+        if signature.parameters[key].annotation is str and not isinstance(value, str):
+            return (f"Error: invalid arguments for {name}: "
+                    f"{key} must be a string, got {type(value).__name__}")
     return handler(**args)
 
 
@@ -409,7 +419,7 @@ def run_tool_loop(
         if not tool_calls:
             return msg.get("content", "").strip()
 
-        for call in tool_calls:
+        for index, call in enumerate(tool_calls):
             name        = call["function"]["name"]
             raw         = call["function"].get("arguments", {})
             args, _     = _decode_tool_args(raw)
@@ -429,10 +439,15 @@ def run_tool_loop(
                     f"{repeat_limit} times in a row. That tool will not advance the "
                     f"task further. Stop calling it and respond with a plain text "
                     f"summary of what you've accomplished and what's blocking you.")
-                messages.append({"role": "user", "content": stop_note})
-                # Append the result one last time so the conversation is consistent
+                # Answer this call and skip the rest of the message, so every
+                # tool call has a result right after it (the Claude API
+                # requires that), then add the note.
                 messages.append(_tool_message(dispatch_tool_call(name, raw, handlers),
                                               tool_use_id))
+                for skipped in tool_calls[index + 1:]:
+                    messages.append(_tool_message(
+                        "Skipped: the loop guard ended this turn.", skipped.get("id")))
+                messages.append({"role": "user", "content": stop_note})
                 # One more round, no tools, to extract a text answer
                 final = chat(messages, tools=[])
                 messages.append(final)
@@ -444,9 +459,15 @@ def run_tool_loop(
             messages.append(_tool_message(dispatch_tool_call(name, raw, handlers),
                                           tool_use_id))
 
-    notice = f"[agent] stopped after {max_rounds} rounds without a final answer."
+    notice = f"{ROUND_LIMIT_NOTICE} {max_rounds} rounds without a final answer."
     print(f"\n    {notice}")
     return notice
+
+
+def stopped_at_round_limit(reply: str) -> bool:
+    """True when run_tool_loop() returned its round-limit notice, i.e. the
+    model never gave a final answer (callers must not read it as a result)."""
+    return reply.startswith(ROUND_LIMIT_NOTICE)
 
 
 def _tool_message(result: str, tool_use_id: Optional[str]) -> dict:

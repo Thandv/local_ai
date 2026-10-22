@@ -36,8 +36,8 @@ model name starting with `claude` selects the Claude API, which needs the
 If Ollama cannot be reached after 3 attempts (2 s and 4 s apart), or the
 Claude backend is missing its package or key, the model call raises
 `LLMUnavailableError`. `build-app` then stops with the verdict `FAILED` (see
-[Build verdict](#build-verdict)); `vibe` and `agent` exit with status 1 and
-print the message to stderr.
+[Build verdict](#build-verdict)); `build-app`, `vibe` and `agent` exit with
+status 1 and print the reason to stderr.
 
 ## Install
 
@@ -88,9 +88,9 @@ What is in place: every agent tool loop, in `build-app` and in both REPLs,
 runs on one shared loop (`run_tool_loop` in `agents/shared/llm.py`). It stops
 after 20 model rounds with `[agent] stopped after 20 rounds without a final
 answer.`; the same tool call repeated 3 times in a row ends it early; and a
-malformed tool call (invalid JSON, or arguments that are not an object or do
-not match the tool) goes back to the model as
-`Error: invalid arguments for <tool>: ...` instead of crashing.
+malformed tool call (invalid JSON, arguments that are not an object or do not
+match the tool, or a non-string value for a string argument) goes back to the
+model as `Error: invalid arguments for <tool>: ...` instead of crashing.
 
 ## Build verdict
 
@@ -106,13 +106,15 @@ decides it:
 | `FAILED`     | A required stage (Architect, Coder or Tester) raised, or any stage hit `LLMUnavailableError`. The pipeline stops there and no later stage runs. |
 
 Any other stage that raises prints a warning, is recorded in `stage_errors`,
-and the pipeline continues. `build-app --resume DIR` skips the stages listed
+and the pipeline continues. `build-app` exits with status 1 when the verdict
+is `FAILED` and 0 otherwise. `build-app --resume DIR` skips the stages listed
 in `completed_stages`; a stage that raised is not listed, so a resume retries
 it.
 
 **`SUCCESS` does not yet mean the tests passed.** The tester gate still reads
 the Tester agent's own text and looks for pass/fail words (e.g. "passed",
-"ok", "FAILED"), so a failing run can be reported as passing. A gate based on
+"ok", "FAILED"), so a failing run can be reported as passing. (A Tester
+loop that hits the 20-round limit counts as not passing.) A gate based on
 the real exit code of the project's test command is planned; it needs the
 guarded runner above.
 

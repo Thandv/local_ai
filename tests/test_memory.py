@@ -5,7 +5,9 @@ import tempfile
 from pathlib import Path
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
-from local_ai.agents.shared.memory import MIN_SOURCE_FILES, MIN_SOURCE_LOC, Project, Verdict
+from local_ai.agents.shared.memory import (
+    MIN_SOURCE_FILES, MIN_SOURCE_LOC, Project, Verdict, read_build_log,
+)
 
 
 def _write_lines(path: Path, n: int) -> None:
@@ -150,3 +152,10 @@ class VerdictTests(support.GuardedTestCase):
         self.assertEqual(log["completed_stages"], ["designer", "coder"])
         self.assertEqual(log["verdict"], "SUCCESS")
         self.assertIn("✓ SUCCESS", self.project.summary())
+
+
+class ReadBuildLogTests(support.GuardedTestCase):
+    def test_non_object_log_reads_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "BUILD_LOG.json").write_text("[]", encoding="utf-8")
+            self.assertEqual(read_build_log(Path(tmp)), {})

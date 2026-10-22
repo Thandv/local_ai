@@ -14,7 +14,7 @@ from typing import Callable
 from unittest import mock
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
-from local_ai import orchestrator
+from local_ai import build_cli, orchestrator
 from local_ai.agents.shared.llm import LLMUnavailableError
 from local_ai.agents.shared.memory import Project, Verdict
 
@@ -141,9 +141,8 @@ class ResumeTests(support.GuardedTestCase):
         self.assertEqual(project.instruction, "new invented idea")
 
 
-class StageFailureTests(support.GuardedTestCase):
-    """A required stage (architect, coder, tester) or an unavailable model
-    stops the pipeline with verdict FAILED; an optional stage only warns."""
+class PipelineCase(support.GuardedTestCase):
+    """Runs orchestrator.run with every stage replaced by a recording fake."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -179,6 +178,11 @@ class StageFailureTests(support.GuardedTestCase):
 
     def _log(self) -> dict:
         return json.loads((self.out / "BUILD_LOG.json").read_text(encoding="utf-8"))
+
+
+class StageFailureTests(PipelineCase):
+    """A required stage (architect, coder, tester) or an unavailable model
+    stops the pipeline with verdict FAILED; an optional stage only warns."""
 
     def test_required_stage_raising_stops_with_failed(self) -> None:
         for stage in ("architect", "coder", "tester"):
@@ -246,3 +250,68 @@ class StageFailureTests(support.GuardedTestCase):
         project, _ = self._run(instruction="", resume_dir=self.out)
         self.assertEqual(self.called, STAGES[STAGES.index("coder"):])
         self.assertNotEqual(project.verdict, Verdict.FAILED)
+
+
+class ReviewFollowUpPipelineTests(PipelineCase):
+    """Verdict on resume, the checkpoint/verdict contract and build-app's exit status."""
+
+    def _fake(self, name: str) -> Callable[[Project], Project]:
+        inner = super()._fake(name)
+
+        def stage(project: Project) -> Project:
+            project = inner(project)
+            if name == "architect":
+                (project.output_dir / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+            if name == "coder":
+                for f in ("app.py", "util.py"):
+                    (project.output_dir / f).write_text("x = 1\n" * 20, encoding="utf-8")
+            if name == "tester":
+                project.success = True
+            return project
+        return stage
+
+    def test_resuming_a_finished_success_build_keeps_success(self) -> None:
+        project, _ = self._build()
+        self.assertEqual(project.verdict, Verdict.SUCCESS)
+        self.called = []
+        project, _ = self._run(instruction="", resume_dir=self.out)
+        self.assertEqual(self.called, [])
+        self.assertEqual(project.verdict, Verdict.SUCCESS)
+        self.assertEqual(self._log()["verdict"], "SUCCESS")
+
+    def test_checkpoint_drops_a_stale_verdict(self) -> None:
+        self.failing = {"coder": RuntimeError("invented coder crash")}
+        self._build()
+        self.assertEqual(self._log()["verdict"], "FAILED")
+        project = Project(instruction="x", output_dir=self.out)
+        orchestrator._save_checkpoint(project, "coder")
+        self.assertNotIn("verdict", self._log())
+
+    def test_build_app_exits_nonzero_when_the_model_is_unavailable(self) -> None:
+        self.failing = {name: LLMUnavailableError("invented: backend is down")
+                        for name in STAGES}
+        argv = ["build-app", "--out", str(self.out), "invented habit tracker"]
+        with contextlib.ExitStack() as stack:
+            for name in STAGES:
+                stack.enter_context(mock.patch.object(
+                    getattr(orchestrator, name), "run", self._fake(name)))
+            stack.enter_context(mock.patch("sys.argv", argv))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            with self.assertRaises(SystemExit) as cm:
+                build_cli.main()
+        self.assertIsInstance(cm.exception.code, str)  # str code -> exit status 1
+        self.assertIn("FAILED", cm.exception.code)
+        self.assertIn("backend is down", cm.exception.code)
+        self.assertEqual(self.called, ["designer"])
+
+    def test_build_app_returns_normally_when_not_failed(self) -> None:
+        argv = ["build-app", "--out", str(self.out), "invented habit tracker"]
+        with contextlib.ExitStack() as stack:
+            for name in STAGES:
+                stack.enter_context(mock.patch.object(
+                    getattr(orchestrator, name), "run", self._fake(name)))
+            stack.enter_context(mock.patch("sys.argv", argv))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            build_cli.main()
+        self.assertEqual(self._log()["verdict"], "SUCCESS")
