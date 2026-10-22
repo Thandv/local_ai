@@ -8,13 +8,16 @@ Select via LOCAL_AI_MODEL env var or set_model() / --model flag:
 Both backends stream tokens to stdout and return the same message dict.
 """
 
+import inspect
 import json
 import os
 import sys
 import time
 import urllib.request
 import urllib.error
-from typing import Optional
+from typing import Any, Callable, Mapping, Optional
+
+ToolHandlers = Mapping[str, Callable[..., str]]
 
 # ── Backend selection ─────────────────────────────────────────────────────────
 
@@ -300,7 +303,41 @@ def _extract_tool_calls(content: str) -> Optional[list]:
     return calls or None
 
 
-def _call_signature(name: str, args: dict) -> str:
+def _decode_tool_args(raw_args: Any) -> tuple[Optional[dict], str]:
+    """Decode a tool call's arguments (a JSON string or an already-decoded
+    value). Returns (args, "") for a JSON object, else (None, reason)."""
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args)
+        except json.JSONDecodeError as e:
+            return None, f"not valid JSON ({e.msg})"
+    if not isinstance(raw_args, dict):
+        return None, f"expected a JSON object, got {type(raw_args).__name__}"
+    return raw_args, ""
+
+
+def dispatch_tool_call(name: str, raw_args: Any, handlers: ToolHandlers) -> str:
+    """Run one model-requested tool call and return the tool result text.
+
+    A malformed call (unknown tool, arguments that are not a JSON object, or
+    that do not bind to the handler's signature) becomes an error result for
+    the model instead of an exception, so one bad call cannot kill a stage.
+    Exceptions raised inside the handler body still propagate.
+    """
+    handler = handlers.get(name)
+    if handler is None:
+        return f"Unknown tool: {name}"
+    args, problem = _decode_tool_args(raw_args)
+    if args is None:
+        return f"Error: invalid arguments for {name}: {problem}"
+    try:
+        inspect.signature(handler).bind(**args)
+    except TypeError as e:
+        return f"Error: invalid arguments for {name}: {e}"
+    return handler(**args)
+
+
+def _call_signature(name: str, args: Any) -> str:
     """Stable string signature of a tool call, used by the no-progress detector."""
     try:
         return f"{name}:{json.dumps(args, sort_keys=True, default=str)[:400]}"
@@ -312,7 +349,7 @@ def run_agent_loop(
     system: str,
     user: str,
     tools: list,
-    handlers: dict,
+    handlers: ToolHandlers,
     history: list = None,
     on_tool_call=None,
     max_rounds: int = 20,
@@ -349,11 +386,11 @@ def run_agent_loop(
         for call in tool_calls:
             name        = call["function"]["name"]
             raw         = call["function"].get("arguments", {})
-            args        = json.loads(raw) if isinstance(raw, str) else raw
+            args, _     = _decode_tool_args(raw)
             tool_use_id = call.get("id")  # present for Claude tool calls
 
             # ── No-progress detector ─────────────────────────────────────
-            sig = _call_signature(name, args)
+            sig = _call_signature(name, raw if args is None else args)
             recent_signatures.append(sig)
             recent_signatures = recent_signatures[-repeat_limit:]
             if (len(recent_signatures) == repeat_limit
@@ -368,8 +405,7 @@ def run_agent_loop(
                     f"summary of what you've accomplished and what's blocking you.")
                 messages.append({"role": "user", "content": stop_note})
                 # Append the result one last time so the conversation is consistent
-                handler = handlers.get(name)
-                result  = handler(**args) if handler else f"Unknown tool: {name}"
+                result = dispatch_tool_call(name, raw, handlers)
                 tool_msg: dict = {"role": "tool", "content": result}
                 if tool_use_id:
                     tool_msg["tool_use_id"] = tool_use_id
@@ -379,10 +415,9 @@ def run_agent_loop(
                 return (final.get("content") or "").strip()
 
             if on_tool_call:
-                on_tool_call(name, args)
+                on_tool_call(name, args or {})
 
-            handler = handlers.get(name)
-            result  = handler(**args) if handler else f"Unknown tool: {name}"
+            result = dispatch_tool_call(name, raw, handlers)
 
             tool_msg: dict = {"role": "tool", "content": result}
             if tool_use_id:
