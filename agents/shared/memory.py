@@ -9,6 +9,8 @@ from pathlib import Path
 from datetime import datetime
 import json
 
+from .guard import shown
+
 
 # Source-file extensions that count toward the "real output" threshold for
 # the success criterion. Markdown docs and config files do NOT count — a
@@ -203,7 +205,7 @@ class Project:
             tests = (f"  Tests   : {r['status']}"
                      + (f" ({r['runner']})" if r.get("runner") else "")
                      + (f" — {r['reason']}" if r.get("reason") else "") + "\n")
-        files    = "\n".join(f"  • {f}" for f in self.files_written) or "  (none)"
+        files    = "\n".join(f"  • {shown(f)}" for f in self.files_written) or "  (none)"
         return (
             f"\n{'='*60}\n"
             f"  {status}\n"

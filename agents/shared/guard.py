@@ -38,6 +38,8 @@ import stat
 import subprocess
 import sys
 import unicodedata
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
@@ -715,19 +717,24 @@ _PIP_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "-
 
 
 _REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
-                "--only-binary", "--no-binary", "--require-hashes", "--hash"}
+                "--only-binary", "--no-binary", "--require-hashes", "--hash",
+                "--config-settings"}
 
 
 def _local_path_of(spec: str) -> Optional[str]:
     """The local path a pip spec or npm spec names, if any: a 'file:' URL,
     `name @ file:///...`, or something that looks like a path."""
-    if "file:" in spec:
-        url = spec[spec.index("file:"):]
-        path = url[len("file:"):]
-        return path[2:] if path.startswith("//") else path
-    if "://" in spec:
-        return None
+    m = re.search(r"file:[^\s;]*", spec)
+    if m:
+        # as pip's url_to_path: a 'localhost' authority is local, %-escapes
+        # are decoded; any other host is refused by returning '/'.
+        parts = urllib.parse.urlsplit(m.group(0))
+        if parts.netloc not in ("", "localhost"):
+            return "/"
+        return urllib.request.url2pathname(parts.path) or "."
     head = spec.split(";")[0].strip()
+    if "://" in head:
+        return None
     if head.startswith((".", "/", "~")) or "/" in head:
         return head
     return None
@@ -739,7 +746,7 @@ def _join_requirement_lines(text: str) -> list:
     for raw in text.splitlines():
         line = re.sub(r"(^|\s)#.*$", "", raw)
         if line.endswith("\\"):
-            current += line[:-1] + " "
+            current += line[:-1]  # pip joins continuations with no space
             continue
         current += line
         if current.strip():
@@ -761,20 +768,23 @@ def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) ->
         raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
     with open(real, "r", encoding="utf-8", errors="replace") as f:
         text = f.read(1_000_000)
-    if re.search(r"\$\{[^}]*\}", text):
-        raise Refused("requirements files may not use ${VAR} expansion")
     base = os.path.dirname(real)
     for line in _join_requirement_lines(text):
+        if re.search(r"\$\{[A-Z0-9_]+\}", line):
+            raise Refused("requirements files may not use ${VAR} expansion")
+        # as pip's break_args_options: the requirement is everything before
+        # the first word starting with '-'; the rest are options.
+        words = line.split(" ")
+        k = next((j for j, w in enumerate(words) if w.startswith("-")), len(words))
+        requirement = " ".join(words[:k]).strip()
         try:
-            tokens = shlex.split(line)
+            tokens = shlex.split(" ".join(words[k:]))
         except ValueError:
             raise Refused(f"cannot parse requirements line {line!r}")
-        if not tokens[0].startswith("-"):
-            local = _local_path_of(line)
+        if requirement:
+            local = _local_path_of(requirement)
             if local is not None and not _path_ok(sandbox, cwd, local):
                 raise Refused(f"requirements line {line!r} points outside the build dir")
-            # anything after the requirement is per-requirement options (--hash)
-            tokens = [t for t in tokens[1:] if t.startswith("-")]
         i = 0
         while i < len(tokens):
             name, eq, value = tokens[i].partition("=")
@@ -784,7 +794,7 @@ def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) ->
             needs_value = name in _PIP_PATH_OPTS or name in ("-i", "--index-url",
                                                                "--extra-index-url",
                                                                "--only-binary", "--no-binary",
-                                                               "--hash")
+                                                               "--hash", "--config-settings")
             if needs_value and not eq:
                 if i + 1 >= len(tokens):
                     raise Refused(f"requirements option {name!r} needs a value")

@@ -18,6 +18,7 @@ from pathlib import Path
 from datetime import datetime
 
 from local_ai.agents.shared import guard
+from local_ai.agents.shared.guard import shown
 from local_ai.agents.shared.llm import LLMUnavailableError
 from local_ai.agents.shared.memory import BUILD_LOG, Project, read_build_log
 from local_ai.agents import (
@@ -131,7 +132,7 @@ def run(
         instruction = instruction or checkpoint.get("instruction", instruction)
         output_dir = resume_dir
         print(f"\n  Resuming build in: {output_dir}")
-        print(f"  Completed stages : {', '.join(completed_stages) or 'none'}")
+        print(f"  Completed stages : {shown(', '.join(map(str, completed_stages))) or 'none'}")
     else:
         completed_stages = set()
         if not output_dir:
@@ -155,7 +156,7 @@ def run(
             rerun_test_gate = True
 
     print(f"\n{'='*60}")
-    print(f"  Building: {instruction}")
+    print(f"  Building: {shown(instruction)}")
     print(f"  Output  : {output_dir}")
     print(f"{'='*60}")
 
@@ -184,7 +185,14 @@ def run(
     with guard.sandboxed(output_dir, yes_unsafe=yes_unsafe):
         if rerun_test_gate:
             print("  Re-running the test gate (results are not trusted from BUILD_LOG.json) …")
-            project.test_results = tester.run_test_gate(project)
+            try:
+                project.test_results = tester.run_test_gate(project)
+            except Exception as e:
+                project.record_stage_error("tester", e, fatal=True)
+                traceback.print_exc()
+                project.save_log()
+                print(project.summary())
+                return project
             project.success = project.test_results["status"] == "pass"
         return _run_stages(project, active_stages, step, total, interactive)
 
