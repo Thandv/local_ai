@@ -17,6 +17,7 @@ from .shared import guard
 from .shared.guard import VENV_DIR
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 MAX_ATTEMPTS = 3
@@ -58,12 +59,14 @@ _SKIP_DIRS = {".git", VENV_DIR, "venv", "node_modules", "__pycache__", ".pytest_
               "dist", "build"}
 _NO_TESTS = re.compile(r"\bno tests (ran|found|collected)\b|(?<![\d.])0 tests?\b", re.IGNORECASE)
 _UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
+_UNITTEST_SKIPPED = re.compile(r"\bskipped=(\d+)")
+_PYTEST_PASSED = re.compile(r"\b[1-9]\d* passed\b")
 _PYTEST_IMPORT = re.compile(r"^\s*(import pytest\b|from pytest\b)", re.MULTILINE)
 
 
 def _scan_python_tests(out: Path) -> tuple[bool, bool]:
     """(has_tests, needs_pytest) for the build dir, without following symlinks."""
-    has = (out / "tests").is_dir() and not (out / "tests").is_symlink()
+    has = False  # a tests/ dir alone is not Python (it may hold JS tests)
     needs_pytest = False
     for dirpath, dirnames, filenames in os.walk(out):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
@@ -138,11 +141,15 @@ def detect_test_command(out: Path) -> dict:
 
 def judge(runner: str, returncode: int, output: str) -> tuple[str, str]:
     """(status, reason) for a test command that ran. pytest passes only on
-    exit 0 (5 = nothing collected); unittest only on exit 0 with 'Ran N tests',
-    N >= 1; npm on exit 0 (its output is not parsed beyond 'no tests')."""
+    exit 0 with at least one 'N passed' (5 = nothing collected); unittest only
+    on exit 0 with 'Ran N tests', N >= 1, not all skipped; npm on exit 0 (its
+    output is not parsed beyond 'no tests')."""
     if runner == "unittest":
         ran = _UNITTEST_RAN.findall(output)
         count = int(ran[-1]) if ran else 0
+        skipped = _UNITTEST_SKIPPED.findall(output)
+        if returncode == 0 and count >= 1 and skipped and int(skipped[-1]) >= count:
+            return "fail", "every test was skipped"
         if returncode == 0 and count >= 1:
             return "pass", f"{count} test(s) ran"
         if returncode in (0, 5) and count == 0:
@@ -154,6 +161,8 @@ def judge(runner: str, returncode: int, output: str) -> tuple[str, str]:
         return "fail", f"{runner} exited {returncode}"
     if _NO_TESTS.search(output):
         return "fail", "the test command ran no tests"
+    if runner == "pytest" and not _PYTEST_PASSED.search(output):
+        return "fail", "pytest reported no passed tests (all skipped?)"
     return "pass", ""
 
 
@@ -221,9 +230,9 @@ Files already written:
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
             print(f"    [{name}]")
 

@@ -7,6 +7,7 @@ Runs after the Coder and before the Tester.
 
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 MAX_ATTEMPTS = 5
@@ -78,9 +79,9 @@ Files written so far:
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
             print(f"    [{name}]")
 

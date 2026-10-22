@@ -16,6 +16,7 @@ from .shared.llm import run_agent_loop
 from .shared.tools import (
     grep_repos, SEARCH_GITHUB, PEEK_README, CLONE_SHALLOW, HANDLERS, wrap_untrusted,
 )
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior software research agent.
@@ -109,9 +110,9 @@ Write a research brief covering:
         if name == "search_github":
             print(f"    [search] {args.get('query','')!r}")
         elif name == "peek_readme":
-            print(f"    [peek]   {args.get('repo_url','')}")
+            print(f"    [peek]   {shown(args.get('repo_url',''))}")
         elif name == "clone_shallow":
-            print(f"    [clone]  {args.get('repo_url','')}")
+            print(f"    [clone]  {shown(args.get('repo_url',''))}")
         else:
             print(f"    [{name}]")
 

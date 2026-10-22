@@ -11,6 +11,7 @@ Writes REVIEW.md and applies any critical fixes.
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, SEARCH_CODE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a principal engineer doing a final code review.
@@ -78,7 +79,7 @@ Review all source files, fix any critical issues, then write REVIEW.md to {out}/
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         else:
             print(f"    [{name}]")
 

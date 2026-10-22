@@ -74,7 +74,8 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   including `..`, absolute paths and symlinks (paths are opened one component
   at a time with `O_NOFOLLOW`, so a symlink swapped in later is refused too).
   `write_file` also refuses hard links and anything under `.git`, `.venv`,
-  `node_modules`, `.npmrc`, `.envrc` or `.vscode` (case-insensitively).
+  `node_modules`, `.npmrc`, `.envrc`, `.vscode` or `BUILD_LOG.json`
+  (case-insensitively).
   `list_files` and `search_code` (a case-insensitive literal search) walk the
   root without entering symlinked dirs and read files through the same checks. With no root configured,
   every tool refuses.
@@ -101,8 +102,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
 - **Installs.** `pip` runs only as `ROOT/.venv/bin/python -m pip` (the model
   creates the venv with `python3 -m venv .venv`), never the PATH interpreter;
   options that install elsewhere (`--user`, `--target`, `--prefix`, ...) are
-  refused. `npm install` runs only next to a package.json in the working dir,
-  without `-g` or `--prefix`. Both always need the confirmation (or
+  refused, also inside a `-r` requirements file. `npm install` runs only next
+  to a package.json in the working dir; `-g`, `--global`, `--prefix` and
+  similar options are refused in any npm command. Both always need the confirmation (or
   `--yes-unsafe`), so a build with no TTY installs nothing.
 - **Untrusted text.** `peek_readme`, `clone_shallow`, `search_github` and the
   repo snippets are wrapped as `<untrusted-data>` blocks, and the Researcher's
@@ -152,7 +154,7 @@ the model's own report is not used. It records `test_results` (`status`
 pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
 `BUILD_LOG.json` and prints a `Tests` line in the summary.
 
-- Python tests (`test_*.py`, `*_test.py` or a `tests/` dir) run with the build
+- Python tests (`test_*.py` or `*_test.py` files) run with the build
   venv's interpreter: `.venv/bin/python -m pytest -q` when `.venv/bin/pytest`
   exists, else `-m unittest discover`. Tests that import pytest, or a
   `conftest.py`/`pytest.ini`, with no pytest in `.venv` are skipped; so are
@@ -160,8 +162,9 @@ pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
 - Otherwise `npm test`, when package.json has a `test` script that is not
   npm's "no test specified" stub. It needs a confirmation unless the script is
   a plain test-runner command (see [Safety](#safety)).
-- pytest passes only on exit 0 (exit 5, nothing collected, fails). unittest
-  passes only on exit 0 with `Ran N tests`, N >= 1. **`npm test` passes on
+- pytest passes only on exit 0 with at least one `N passed` (exit 5, nothing
+  collected, fails). unittest passes only on exit 0 with `Ran N tests`,
+  N >= 1, not all of them skipped. **`npm test` passes on
   exit 0 without counting tests**; only output that says no tests ran (for
   example `0 tests`) fails it.
 - No test command found is a fail ("no tests found"). A failing gate gives

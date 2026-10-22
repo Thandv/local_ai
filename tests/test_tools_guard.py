@@ -505,6 +505,7 @@ class RunCommandAllowedTests(SandboxCase):
         (self.root / "package.json").write_text(
             json.dumps({"scripts": {"test": "jest --ci", "build": "node build.js"}}),
             encoding="utf-8")
+        (self.root / "build.js").write_text("", encoding="utf-8")
         tools.run_command("npm test")
         self.assertEqual(self.run_argv(), ["/usr/bin/npm", "test"])
         self.run_mock.reset_mock()

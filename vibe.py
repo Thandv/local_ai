@@ -21,6 +21,7 @@ from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
 from local_ai.agents.shared import guard
+from local_ai.agents.shared.guard import shown
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE, wrap_untrusted,
 )
@@ -120,9 +121,9 @@ TOOL_HANDLERS = {
 
 def _show_call(name: str, args: dict) -> None:
     if name == "run_command":
-        print(f"\n    $ {args.get('command', '')}")
+        print(f"\n    $ {shown(args.get('command', ''))}")
     elif name == "write_file":
-        print(f"\n    write {args.get('path', '')}")
+        print(f"\n    write {shown(args.get('path', ''))}")
     else:
         print(f"\n  [{name}]", end="")
 

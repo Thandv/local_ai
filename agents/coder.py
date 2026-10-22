@@ -7,6 +7,7 @@ Uses tools: read_file, write_file, list_files, run_command.
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are an expert software engineer who writes complete, production-quality code.
@@ -110,9 +111,9 @@ Do NOT ask the user for anything; use your tools.
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
             print(f"    [{name}]")
 

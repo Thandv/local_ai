@@ -8,6 +8,7 @@ Writes PLAN.md into the output directory.
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import WRITE_FILE, HANDLERS, wrap_untrusted
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior software architect.
@@ -58,7 +59,7 @@ After writing the plan, respond with a short summary of the architecture.
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         else:
             print(f"    [{name}]")
 

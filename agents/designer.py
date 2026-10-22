@@ -7,6 +7,7 @@ Runs before the Architect so the Coder gets richer UI context.
 
 from .shared.llm import run_agent_loop
 from .shared.tools import WRITE_FILE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior product designer and frontend architect.
@@ -51,7 +52,7 @@ Then give a one-paragraph summary of the overall design approach.
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         else:
             print(f"    [{name}]")
 

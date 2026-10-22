@@ -52,7 +52,8 @@ MAX_READ_BYTES = 2_000_000
 # because APFS is case-insensitive by default): git hooks/config, the build
 # venv's interpreters and pip config, installed packages, npm config, and
 # files other tools run on their own (direnv's .envrc, VS Code tasks).
-PROTECTED_NAMES = frozenset({".git", VENV_DIR, "node_modules", ".npmrc", ".envrc", ".vscode"})
+PROTECTED_NAMES = frozenset({".git", VENV_DIR, "node_modules", ".npmrc", ".envrc", ".vscode",
+                             "build_log.json"})  # the pipeline's own checkpoint
 
 # Environment variables a command keeps; everything else (API keys, PYTHON*,
 # NODE_OPTIONS, GIT_*, npm_config_*, LD_*/DYLD_*) is dropped.
@@ -119,11 +120,21 @@ def _check_text(value, what: str, limit: int) -> str:
         raise Refused(f"{what} must be a string")
     if "\x00" in value:
         raise Refused(f"{what} contains a NUL byte")
+    if not _encodable(value):
+        raise Refused(f"{what} is not valid UTF-8 text")
     if len(value) > limit:
         raise Refused(f"{what} is longer than {limit} characters")
     if not value.strip():
         raise Refused(f"{what} is empty")
     return value
+
+
+def _encodable(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _within(path: str, base: str) -> bool:
@@ -319,6 +330,7 @@ class _Plan:
     argv: list            # argv[0] is an absolute executable path
     confirm: str = ""     # why it needs the person's confirmation ("" = allowlisted)
     env_extra: tuple = ()
+    use_venv: bool = True  # put ROOT/.venv/bin first on the child's PATH
 
 
 _SHELL_OPERATOR = re.compile(r"^(\|\|?|&&?|;;?|\d*[<>]{1,2}&?\d*|[<>]\(.*)$")
@@ -333,6 +345,8 @@ def _check_argv(argv) -> list:
             raise Refused("every argument must be a string")
         if "\x00" in tok:
             raise Refused("command contains a NUL byte")
+        if not _encodable(tok):
+            raise Refused("command is not valid UTF-8 text")
         total += len(tok) + 1
     if total > MAX_COMMAND_CHARS:
         raise Refused(f"command is longer than {MAX_COMMAND_CHARS} characters")
@@ -390,10 +404,10 @@ def _program(sandbox: Sandbox, name: str, *, use_venv: bool = True) -> str:
     return found
 
 
-def _child_env(sandbox: Sandbox, extra: Sequence[tuple] = ()) -> dict:
+def _child_env(sandbox: Sandbox, extra: Sequence[tuple] = (), *, use_venv: bool = True) -> dict:
     env = {k: os.environ[k] for k in _ENV_KEEP if k in os.environ}
     entries = _safe_path_entries(sandbox)
-    venv = venv_dir(sandbox)
+    venv = venv_dir(sandbox) if use_venv else None
     if venv:
         entries.insert(0, os.path.join(venv, "bin"))
         env["VIRTUAL_ENV"] = venv
@@ -438,6 +452,8 @@ def _pytest_pinned(sandbox: Sandbox) -> list:
 
 
 def _pytest_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
+    if any(a.startswith("@") for a in args):
+        return False  # pytest reads more arguments from an @file
     i, positional_only = 0, False
     while i < len(args):
         a = args[i]
@@ -507,6 +523,15 @@ def _unittest_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
     return True
 
 
+def _single_link_file(path: str) -> bool:
+    """A regular file (not a symlink) with no other hard link."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) and st.st_nlink == 1
+
+
 def _real_dir_in_cwd(cwd: str, name: str) -> bool:
     try:
         return stat.S_ISDIR(os.lstat(os.path.join(cwd, name)).st_mode)
@@ -534,7 +559,8 @@ def _node_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
         return all(not a.startswith("-") and _path_ok(sandbox, cwd, a) for a in args[1:])
     # `node <script inside root> [script args]`; any node flag (-e, -p,
     # --require, --import, --inspect, ...) needs confirmation.
-    return not args[0].startswith("-") and _path_ok(sandbox, cwd, args[0])
+    return (not args[0].startswith("-") and _path_ok(sandbox, cwd, args[0])
+            and os.path.isfile(_real_from(cwd, args[0])))
 
 
 # git: only these subcommands, with these flags; global options (-c, -C,
@@ -688,6 +714,46 @@ _PIP_PATH_OPTS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable
 _PIP_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--format"}
 
 
+_REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
+                "--only-binary", "--no-binary", "--require-hashes", "--hash"}
+
+
+def _check_requirements(sandbox: Sandbox, path: str, *, depth: int) -> None:
+    """Apply the pip path rules to the lines of a requirements/constraints
+    file too (the confirmation prompt shows only `-r <file>`)."""
+    if depth > 3:
+        raise Refused("requirements files nest too deeply")
+    real = os.path.realpath(path)
+    if not is_inside(sandbox, real) or not _single_link_file(path):
+        raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
+    with open(real, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.read(1_000_000).splitlines()
+    base = os.path.dirname(real)
+    for raw in lines:
+        line = raw.split(" #", 1)[0].strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            tokens = shlex.split(line)
+        except ValueError:
+            raise Refused(f"cannot parse requirements line {line!r}")
+        first = tokens[0]
+        if first.startswith("-"):
+            name, eq, value = first.partition("=")
+            if not eq and len(tokens) > 1:
+                value = tokens[1]
+            if name in _PIP_PATH_OPTS:
+                if not _path_ok(sandbox, base, value):
+                    raise Refused(f"requirements line {line!r} points outside the build dir")
+                if name in ("-r", "--requirement", "-c", "--constraint"):
+                    _check_requirements(sandbox, os.path.join(base, value), depth=depth + 1)
+            elif name not in _REQ_OPTS_OK:
+                raise Refused(f"requirements option {name!r} is not allowed")
+        elif (first.startswith((".", "/", "~")) or "/" in first.split(";")[0]) \
+                and "://" not in first and not _path_ok(sandbox, base, first):
+            raise Refused(f"requirements line {line!r} points outside the build dir")
+
+
 def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
     venv = venv_dir(sandbox)
     if not venv:
@@ -710,6 +776,8 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
                 value = args[i]
             if name in _PIP_PATH_OPTS and not _path_ok(sandbox, cwd, value):
                 raise Refused(f"pip {name} {value!r} must be a path inside the build dir")
+            if name in ("-r", "--requirement", "-c", "--constraint"):
+                _check_requirements(sandbox, os.path.join(cwd, value), depth=0)
         elif a.startswith("-"):
             raise Refused(f"pip option {a!r} is not allowed (installs must stay in "
                           f"{VENV_DIR})")
@@ -729,8 +797,30 @@ _NPM_INSTALL_FLAGS = {"--save-dev", "-D", "--save", "-S", "--save-exact", "-E", 
                       "--omit=optional", "--production"}
 
 
+_NPM_LEAVES_BUILD = ("global", "prefix", "location", "userconfig", "globalconfig",
+                     "script-shell", "cache")
+
+
+def _npm_option_leaves_build(tok: str) -> bool:
+    """-g / --global / --prefix / --location ... in any position, including
+    the abbreviations npm's option parser expands (e.g. --glob)."""
+    if tok == "-g" or (tok.startswith("-") and not tok.startswith("--") and "g" in tok[1:]):
+        return True
+    if not tok.startswith("--"):
+        return False
+    name = tok[2:].split("=", 1)[0].lower()
+    return len(name) >= 2 and any(full.startswith(name) for full in _NPM_LEAVES_BUILD)
+
+
 def _npm_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
-    npm = _program(sandbox, "npm")
+    npm = _program(sandbox, "npm", use_venv=False)
+    for a in args:
+        if a == "--":
+            break
+        if _npm_option_leaves_build(a):
+            raise Refused(f"npm option {a!r} is not allowed (npm must stay in this build)")
+    if args and args[0].startswith("-"):
+        raise Refused("npm options go after the subcommand (e.g. npm install --save-dev x)")
     if args and args[0] in _NPM_INSTALL:
         if not _plain_file_in_cwd(cwd, "package.json"):
             raise Refused("npm installs only into this build: write package.json in the "
@@ -747,16 +837,18 @@ def _npm_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
                 path = a[5:] if a.startswith("file:") else a
                 if not _path_ok(sandbox, cwd, path):
                     raise Refused(f"npm path {a!r} must be inside the build dir")
-        return _Plan([npm, *args], confirm="npm install downloads and runs third-party code")
+        return _Plan([npm, *args], use_venv=False,
+                     confirm="npm install downloads and runs third-party code")
     name = None
     if list(args) in (["test"], ["t"]):
         name = "test"
     elif len(args) == 2 and args[0] in ("run", "run-script"):
         name = args[1]
     if name is None:
-        return _Plan([npm, *args], confirm="this npm command is not on the allowlist")
+        return _Plan([npm, *args], use_venv=False,
+                     confirm="this npm command is not on the allowlist")
     ok, why = _npm_script_safe(sandbox, cwd, name)
-    return _Plan([npm, *args], confirm="" if ok else
+    return _Plan([npm, *args], use_venv=False, confirm="" if ok else
                  f"npm runs package.json scripts through a shell ({why})")
 
 
@@ -829,33 +921,41 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
     if prog == "npm":
         return _npm_plan(sandbox, cwd, args)
     if prog == "node":
-        return _Plan([_program(sandbox, "node"), *args],
+        return _Plan([_program(sandbox, "node", use_venv=False), *args], use_venv=False,
                      confirm="" if _node_args_ok(sandbox, cwd, args)
                      else "node runs only a script inside the build dir without confirmation")
     if prog == "ls":
-        return _Plan([_program(sandbox, "ls"), *args],
+        return _Plan([_program(sandbox, "ls", use_venv=False), *args], use_venv=False,
                      confirm="" if _paths_with_flags_ok(sandbox, cwd, args, r"-[1aAlhRrtSFd]+")
                      else "ls outside the build dir")
     if prog == "cat":
-        return _Plan([_program(sandbox, "cat"), *args],
-                     confirm="" if args and _paths_with_flags_ok(sandbox, cwd, args, r"-[nb]+")
-                     else "cat outside the build dir")
+        ok = (args and _paths_with_flags_ok(sandbox, cwd, args, r"-[nb]+")
+              and all(_single_link_file(os.path.join(cwd, a))
+                      for a in args if a != "--" and not a.startswith("-")))
+        return _Plan([_program(sandbox, "cat", use_venv=False), *args], use_venv=False,
+                     confirm="" if ok else "cat outside the build dir")
     if prog == "git":
         tail = _git_args_ok(sandbox, cwd, args)
-        git = _program(sandbox, "git")
+        git = _program(sandbox, "git", use_venv=False)
         if tail is not None:
             root = str(sandbox.root)
-            return _Plan([git, *tail], env_extra=(
+            return _Plan([git, *tail], use_venv=False, env_extra=(
                 ("GIT_DIR", os.path.join(root, ".git")), ("GIT_WORK_TREE", root),
                 ("GIT_CEILING_DIRECTORIES", os.path.dirname(root)),
                 ("GIT_TERMINAL_PROMPT", "0")))
-        return _Plan([git, *args], confirm="this git command is not on the allowlist")
+        return _Plan([git, *args], use_venv=False,
+                     confirm="this git command is not on the allowlist")
     return _Plan([_program(sandbox, prog), *args], confirm=f"{prog!r} is not on the allowlist")
 
 
+def shown(text) -> str:
+    """`text` with every non-printable character (ESC, CR, newline, bidi
+    controls, ...) escaped, so model-chosen text cannot restyle the terminal."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in str(text))
+
+
 def _printable(arg: str) -> str:
-    shown = "".join(c if c.isprintable() else repr(c)[1:-1] for c in arg)
-    return shlex.quote(shown)
+    return shlex.quote(shown(arg))
 
 
 def _has_tty() -> bool:
@@ -872,7 +972,7 @@ def _ask(prompt: str) -> str:
 
 
 def _confirm(sandbox: Sandbox, cwd: str, plan: _Plan) -> bool:
-    print(f"\n  [confirm] The model wants to run, in {cwd}:\n"
+    print(f"\n  [confirm] The model wants to run, in {shown(cwd)}:\n"
           f"    {' '.join(_printable(a) for a in plan.argv)}\n"
           f"  Not on the allowlist: {plan.confirm}")
     try:
@@ -906,7 +1006,7 @@ def run_argv(argv: Sequence[str], working_dir: Optional[str] = None) -> Outcome:
         if os.path.realpath(cwd) != cwd or not is_inside(sandbox, cwd) or os.path.islink(cwd):
             return Outcome("refused", tuple(plan.argv), reason="the working dir changed")
         result = subprocess.run(
-            plan.argv, shell=False, cwd=cwd, env=_child_env(sandbox, plan.env_extra),
+            plan.argv, shell=False, cwd=cwd, env=_child_env(sandbox, plan.env_extra, use_venv=plan.use_venv),
             stdin=subprocess.DEVNULL, capture_output=True, text=True,
             errors="replace", timeout=TIMEOUT_S,
         )
