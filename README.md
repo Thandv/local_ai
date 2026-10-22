@@ -129,22 +129,40 @@ decides it:
 
 | Verdict      | Meaning |
 |--------------|---------|
-| `SUCCESS`    | `PLAN.md` exists; there are at least 2 source files with at least 30 lines between them (docs, `node_modules`, venvs and build dirs do not count); and the tester did not report a failure. |
-| `INCOMPLETE` | The pipeline ran, but one of those gates did not pass. |
+| `SUCCESS`    | `PLAN.md` exists; there are at least 2 source files with at least 30 lines between them (docs, `node_modules`, venvs and build dirs do not count); and the test gate passed. |
+| `UNVERIFIED` | Every other gate passed, but the tests were not run: no TTY to confirm the test command, the person declined it, no build venv, or pytest/npm missing. |
+| `INCOMPLETE` | The pipeline ran, but one of those gates did not pass (including tests that ran and failed, or no tests found). |
 | `FAILED`     | A required stage (Architect, Coder or Tester) raised, or any stage hit `LLMUnavailableError`. The pipeline stops there and no later stage runs. |
 
 Any other stage that raises prints a warning, is recorded in `stage_errors`,
 and the pipeline continues. A build or `--resume` run of `build-app` exits
 with status 1 when the verdict is `FAILED` and 0 otherwise. `build-app --resume DIR` skips the stages listed
-in `completed_stages`; a stage that raised is not listed, so a resume retries
+in `completed_stages` (a finished tester's `test_results` are restored); a stage that raised is not listed, so a resume retries
 it.
 
-**`SUCCESS` does not yet mean the tests passed.** The tester gate still reads
-the Tester agent's own text and looks for pass/fail words (e.g. "passed",
-"ok", "FAILED"), so a failing run can be reported as passing. (A Tester
-loop that hits the 20-round limit counts as not passing.) A gate based on
-the real exit code of the project's test command is planned; it needs the
-guarded runner from [Safety](#safety).
+**The test gate.** After the Tester agent writes and runs its tests, the
+Tester stage (`run_test_gate` in `agents/tester.py`) runs the project's test
+command itself, as a fixed argv through the guard, and reads its exit code;
+the model's own report is not used. It records `test_results` (`status`
+pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
+`BUILD_LOG.json` and prints a `Tests` line in the summary.
+
+- Python tests (`test_*.py`, `*_test.py` or a `tests/` dir) run with the build
+  venv's interpreter: `.venv/bin/python -m pytest -q` when `.venv/bin/pytest`
+  exists, else `-m unittest discover`. Tests that import pytest, or a
+  `conftest.py`/`pytest.ini`, with no pytest in `.venv` are skipped; so are
+  tests with no `.venv`.
+- Otherwise `npm test`, when package.json has a `test` script that is not
+  npm's "no test specified" stub. It needs a confirmation unless the script is
+  a plain test-runner command (see [Safety](#safety)).
+- pytest passes only on exit 0 (exit 5, nothing collected, fails). unittest
+  passes only on exit 0 with `Ran N tests`, N >= 1. **`npm test` passes on
+  exit 0 without counting tests**; only output that says no tests ran (for
+  example `0 tests`) fails it.
+- No test command found is a fail ("no tests found"). A failing gate gives
+  the model up to 3 fix attempts, each followed by a new run of the gate.
+- No TTY, a declined confirmation, a refusal or a missing venv/pytest/npm
+  is `skipped`, which gives `UNVERIFIED`, never `SUCCESS`.
 
 ## Tests
 

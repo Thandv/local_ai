@@ -77,6 +77,7 @@ def _save_checkpoint(project: Project, stage: str):
     if stage == "tester":
         # Kept apart from "success", which save_log() overwrites with the verdict.
         log["tester_passed"] = project.success
+        log["test_results"] = project.test_results
     completed = log.get("completed_stages", [])
     if stage not in completed:
         completed.append(stage)
@@ -149,6 +150,8 @@ def run(
         if "tester" in completed_stages:
             # The tester is not re-run on resume; restore its gate result.
             project.success = bool(checkpoint.get("tester_passed"))
+            if isinstance(checkpoint.get("test_results"), dict):
+                project.test_results = checkpoint["test_results"]
 
     print(f"\n{'='*60}")
     print(f"  Building: {instruction}")

@@ -35,6 +35,15 @@ After fixing issues, write a REVIEW.md summarising:
 """
 
 
+def _test_summary(project: Project) -> str:
+    r = project.test_results if isinstance(project.test_results, dict) else {}
+    if not r.get("status"):
+        return "No tests run"
+    head = f"status: {r['status']} (runner: {r.get('runner') or 'none'}, " \
+           f"exit code: {r.get('returncode')}) {r.get('reason') or ''}".rstrip()
+    return head + ("\n" + r["output_tail"][-2000:] if r.get("output_tail") else "")
+
+
 def run(project: Project) -> Project:
     print("  [Reviewer] Reviewing code quality and completeness …")
 
@@ -48,7 +57,7 @@ Files written:
 {files_ctx}
 
 Test results:
-{project.test_results[-2000:] if project.test_results else 'No tests run'}
+{_test_summary(project)}
 
 Review all source files, fix any critical issues, then write REVIEW.md to {out}/REVIEW.md.
 """
