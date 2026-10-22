@@ -9,6 +9,8 @@ from pathlib import Path
 from datetime import datetime
 import json
 
+from .guard import shown
+
 
 # Source-file extensions that count toward the "real output" threshold for
 # the success criterion. Markdown docs and config files do NOT count — a
@@ -25,11 +27,13 @@ MIN_SOURCE_FILES = 2
 MIN_SOURCE_LOC   = 30
 
 BUILD_LOG = "BUILD_LOG.json"
+TEST_GATE_FAILED = "test gate did not pass"
 
 
 class Verdict(str, Enum):
     """The build's final verdict; Project.compute_verdict() is its one owner."""
     SUCCESS    = "SUCCESS"     # every gate in compute_final_success() passed
+    UNVERIFIED = "UNVERIFIED"  # every other gate passed, but the tests were not run
     INCOMPLETE = "INCOMPLETE"  # the pipeline ran, but a gate did not pass
     FAILED     = "FAILED"      # a required stage raised, or the model was unavailable
 
@@ -57,11 +61,13 @@ class Project:
     plan:          str = ""       # Architect agent plan (also written to PLAN.md)
     files_written: list = field(default_factory=list)  # Paths written by all agents
     debug_log:     str = ""       # Debugger agent output
-    test_results:  str = ""       # Tester output
+    # Tester gate: {status: pass|fail|skipped, runner, returncode, reason,
+    # output_tail}, from the real exit code of the project's test command.
+    test_results:  dict = field(default_factory=dict)
     audit:         str = ""       # Auditor agent output
     review:        str = ""       # Reviewer output
     packaged:      bool = False   # Whether Packager ran successfully
-    success:       bool = False   # Did the test/build gates pass?
+    success:       bool = False   # Did the test gate pass (status "pass")?
 
     # Exceptions raised by stages: {"stage", "error", "fatal"}. A fatal one
     # (required stage, or model unavailable) makes the verdict FAILED.
@@ -128,7 +134,7 @@ class Project:
                            f"need at least {MIN_SOURCE_LOC}")
 
         if not self.success:
-            return False, "test gate did not pass"
+            return False, TEST_GATE_FAILED  # last, so it is the only failing gate
 
         return True, ""
 
@@ -139,15 +145,28 @@ class Project:
             "fatal": fatal,
         })
 
+    def test_status(self) -> str:
+        """The tester gate's status: pass, fail, skipped, or "" if it never ran."""
+        results = self.test_results if isinstance(self.test_results, dict) else {}
+        status = results.get("status")
+        return status if status in ("pass", "fail", "skipped") else ""
+
     def compute_verdict(self) -> tuple[Verdict, str]:
         """The single verdict function: FAILED if a fatal stage error was
-        recorded, else SUCCESS or INCOMPLETE from compute_final_success().
-        Returns (verdict, reason); reason is empty on SUCCESS."""
+        recorded; else SUCCESS when compute_final_success() passes; UNVERIFIED
+        when only the test gate is missing because the tests were skipped (no
+        TTY, a declined confirmation, no build venv or test tool); otherwise
+        INCOMPLETE. Returns (verdict, reason); reason is empty on SUCCESS."""
         fatal = next((e for e in self.stage_errors if e["fatal"]), None)
         if fatal:
             return Verdict.FAILED, f"{fatal['stage']} stage raised {fatal['error']}"
         passed, reason = self.compute_final_success()
-        return (Verdict.SUCCESS if passed else Verdict.INCOMPLETE), reason
+        if passed:
+            return Verdict.SUCCESS, ""
+        if reason == TEST_GATE_FAILED and self.test_status() == "skipped":
+            why = self.test_results.get("reason") or "unknown"
+            return Verdict.UNVERIFIED, f"tests were not run: {why}"
+        return Verdict.INCOMPLETE, reason
 
     def save_log(self):
         """Persist the pipeline log to output_dir/BUILD_LOG.json, with the
@@ -168,6 +187,7 @@ class Project:
             "success":        self.success,
             "success_reason": reason or "all gates passed",
             "stage_errors":   self.stage_errors,
+            "test_results":   self.test_results,
             "packaged":       self.packaged,
         })
         (self.output_dir / BUILD_LOG).write_text(
@@ -179,12 +199,19 @@ class Project:
         status   = f"{mark} {self.verdict.value}"
         reason   = f"  Reason  : {self.success_reason}\n" if (not self.success and self.success_reason) else ""
         packaged = "  Packaged: yes (README + git init)\n" if self.packaged else ""
-        files    = "\n".join(f"  • {f}" for f in self.files_written) or "  (none)"
+        tests    = ""
+        if self.test_status():
+            r = self.test_results
+            tests = (f"  Tests   : {r['status']}"
+                     + (f" ({r['runner']})" if r.get("runner") else "")
+                     + (f" — {r['reason']}" if r.get("reason") else "") + "\n")
+        files    = "\n".join(f"  • {shown(f)}" for f in self.files_written) or "  (none)"
         return (
             f"\n{'='*60}\n"
             f"  {status}\n"
             f"  Project : {self.output_dir}\n"
             f"{reason}"
+            f"{tests}"
             f"{packaged}"
             f"  Files   :\n{files}\n"
             f"{'='*60}\n"

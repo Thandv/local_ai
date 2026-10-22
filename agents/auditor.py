@@ -8,14 +8,19 @@ Runs in parallel with (or just after) the Tester.
 
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a security engineer performing a thorough audit of generated code.
 
 Steps:
 1. **Run static analysis**
-   - Python: `pip install bandit pip-audit -q && bandit -r . -ll && pip-audit`
-   - Node/TS: `npm audit --audit-level=high` (install if needed)
+   One command per call, no shell. These need the person's confirmation; if
+   one is refused, skip the scan, say so in SECURITY.md, and continue.
+   - Python: `python3 -m venv .venv` (if there is no .venv yet), then
+     `pip install bandit pip-audit` (installs into the build's .venv), then
+     `bandit -r . -ll`, then `pip-audit`
+   - Node/TS: `npm audit --audit-level=high`
 2. **Manual inspection** — search for:
    - Hardcoded secrets, API keys, or passwords
    - SQL injection (string interpolation in queries)
@@ -71,11 +76,11 @@ Project files:
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     project.audit = run_agent_loop(
         system=SYSTEM,

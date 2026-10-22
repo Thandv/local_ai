@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior technical writer and project handoff specialist.
@@ -30,7 +31,8 @@ Your job is to package a completed application for handoff to a developer.
    - Generate from route definitions using read_file to inspect the routes
    - Include all endpoints, request/response schemas, and auth (Bearer/APIKey)
 
-3. **Git initialisation** — run in the output directory:
+3. **Git initialisation** — three separate run_command calls (no shell, so
+   never join them with '&&'):
    - `git init`
    - `git add .`
    - `git commit -m "feat: initial generated application"`
@@ -62,7 +64,8 @@ Review / audit notes:
 1. Read the key source files to understand what was built (routes, models, components)
 2. Write a comprehensive README.md at {out}/README.md
 3. If this is an API, generate {out}/openapi.yaml from the route definitions
-4. Run: git init && git add . && git commit -m "feat: initial generated application" in {out}
+4. Run `git init`, then `git add .`, then `git commit -m "feat: initial generated application"`
+   as three separate run_command calls in {out}
 5. Print a handoff summary: what was built, how to run it, deployment steps
 """
 
@@ -83,11 +86,11 @@ Review / audit notes:
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     handoff = run_agent_loop(
         system=SYSTEM,

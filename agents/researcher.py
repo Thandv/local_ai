@@ -14,8 +14,9 @@ import re
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import (
-    grep_repos, SEARCH_GITHUB, PEEK_README, CLONE_SHALLOW, HANDLERS,
+    grep_repos, SEARCH_GITHUB, PEEK_README, CLONE_SHALLOW, HANDLERS, wrap_untrusted,
 )
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior software research agent.
@@ -75,8 +76,8 @@ def run(project: Project) -> Project:
 
     task = f"""Instruction: {project.instruction}
 
-Reference code patterns found in the curated repos:
-{repo_patterns}{sparse_note}
+Reference code patterns found in the curated and discovered repos:
+{wrap_untrusted(repo_patterns, "grep_repos")}{sparse_note}
 
 Write a research brief covering:
 ## Tech Stack
@@ -109,11 +110,11 @@ Write a research brief covering:
         if name == "search_github":
             print(f"    [search] {args.get('query','')!r}")
         elif name == "peek_readme":
-            print(f"    [peek]   {args.get('repo_url','')}")
+            print(f"    [peek]   {shown(args.get('repo_url',''))}")
         elif name == "clone_shallow":
-            print(f"    [clone]  {args.get('repo_url','')}")
+            print(f"    [clone]  {shown(args.get('repo_url',''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     project.research = run_agent_loop(
         system=SYSTEM,

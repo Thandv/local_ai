@@ -13,6 +13,7 @@ if any guarded call has been recorded so far in the run.
 
 import socket
 import subprocess
+import sys
 import unittest
 import urllib.request
 from typing import Any, Callable
@@ -58,6 +59,11 @@ class GuardedTestCase(unittest.TestCase):
     """Base class for every test: fails if any guarded call was recorded."""
 
     def tearDown(self) -> None:
+        # A REPL main() confines its tools for the rest of the process; drop
+        # that sandbox so it cannot leak into the next test.
+        guard = sys.modules.get("local_ai.agents.shared.guard")
+        if guard is not None:
+            guard._ACTIVE.set(None)
         self.assertEqual(CALLS, [], "a guarded network/subprocess call was made")
         super().tearDown()
 

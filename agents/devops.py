@@ -7,6 +7,7 @@ Runs after the Debugger confirms the app starts cleanly.
 
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are a senior DevOps engineer.
@@ -70,9 +71,9 @@ After writing all files, list what was generated.
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     run_agent_loop(
         system=SYSTEM,

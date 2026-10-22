@@ -7,6 +7,7 @@ Runs after the Coder and before the Tester.
 
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 MAX_ATTEMPTS = 5
@@ -15,16 +16,21 @@ SYSTEM = """You are a senior engineer debugging a freshly generated application.
 
 Your job:
 1. Read the project files to understand the stack and entry points
-2. Run a lightweight startup check:
-   - Python: `python -c "import <main_module>"` or `python main.py --help`
-   - Node/TS: `node -e "require('./dist/index')"` or `npx tsc --noEmit`
-   - FastAPI: `python -c "from app.main import app; print('OK')"`
+2. Run a lightweight startup check (one command per call, no shell):
+   - Python syntax: `python3 -m py_compile <file.py>` for each entry point
+   - Python imports: `python3 -m pytest --collect-only -q` (imports the modules
+     its tests import) or `python3 -m unittest discover -v`
+   - Node: `node <entry.js>` only for a script that exits by itself
+   `python -c` and `node -e` are not allowed without the person's confirmation.
 3. If it crashes, read the error carefully and identify the root cause
 4. Apply a targeted fix using write_file (change only what's broken)
 5. Re-run the check — repeat until clean
 
 Focus on: import errors, missing deps, syntax errors, missing files, bad env vars.
-Use `pip install <pkg>` or `npm install <pkg>` to fix missing packages.
+Fix missing Python packages with `pip install <pkg>`, which installs into this
+build's .venv (create it first with `python3 -m venv .venv`); for Node, add the
+package to package.json and run `npm install`. Installs need the person's
+confirmation; if one is refused, do not retry it — report the missing package.
 Do NOT try to start a long-running server — use import checks and --help flags only.
 """
 
@@ -73,11 +79,11 @@ Files written so far:
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     debug_output = run_agent_loop(
         system=SYSTEM,

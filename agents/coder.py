@@ -7,6 +7,7 @@ Uses tools: read_file, write_file, list_files, run_command.
 from pathlib import Path
 from .shared.llm import run_agent_loop
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, HANDLERS
+from .shared.guard import shown
 from .shared.memory import Project
 
 SYSTEM = """You are an expert software engineer who writes complete, production-quality code.
@@ -28,9 +29,14 @@ Rules:
 - Include all necessary imports.
 - Handle errors gracefully at system boundaries.
 - After writing all source files, install dependencies with run_command
-  (e.g. `pip install -r requirements.txt` or `npm install`), with
-  working_dir set to the output directory.
+  (see Commands below).
 - Do NOT write test files — a separate Tester agent handles that.
+Commands (run_command): there is no shell, so run ONE command per call, with no
+pipes, redirects, '&&' or ';'. Every command runs inside the output directory.
+Python packages go only into this build's own venv: run `python3 -m venv .venv`
+once, then `pip install -r requirements.txt` (it is run as the venv's pip). For
+Node, write package.json first, then `npm install`. Installs need the person's
+confirmation; if one is refused, do not retry it, and carry on.
 
 Start writing files immediately using write_file. The plan is below.
 """
@@ -77,9 +83,10 @@ Output directory: {out}
 {plan_block}TASK:
 1. Implement every file the plan describes by calling write_file for each one,
    with full paths under {out}/.
-2. After all source files are written, install dependencies by calling
-   run_command (e.g. command=`pip install -r requirements.txt`,
-   working_dir=`{out}`).
+2. After all source files are written, install dependencies with run_command:
+   first `python3 -m venv .venv`, then `pip install -r requirements.txt`
+   (installs go into {out}/.venv), or `npm install` for Node. One command per
+   call; if an install is refused, do not retry it.
 3. When you're done, respond with a brief summary of what you built.
 
 Do NOT write test files — a separate Tester agent handles that.
@@ -104,11 +111,11 @@ Do NOT ask the user for anything; use your tools.
 
     def on_call(name, args):
         if name == "write_file":
-            print(f"    [write] {args.get('path', '')}")
+            print(f"    [write] {shown(args.get('path', ''))}")
         elif name == "run_command":
-            print(f"    [run]   {args.get('command', '')[:80]}")
+            print(f"    [run]   {shown(str(args.get('command', ''))[:80])}")
         else:
-            print(f"    [{name}]")
+            print(f"    [{shown(name)}]")
 
     result = run_agent_loop(
         system=SYSTEM,

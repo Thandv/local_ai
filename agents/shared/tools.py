@@ -4,14 +4,18 @@ All agents import from here so tool behaviour is consistent.
 """
 
 import json
+import os
+import re
 import shutil
 import subprocess
-import glob as _glob
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+from . import guard
+from .guard import wrap_untrusted  # re-exported for the stages
 
 MAX_OUTPUT = 10_000  # chars — truncate large outputs
 
@@ -22,65 +26,109 @@ REPOS_DISCOVERED = Path.home() / ".local-ai" / "repos-discovered"
 # ── Implementations ───────────────────────────────────────────────────────────
 
 def read_file(path: str) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"File not found: {path}"
+    """Read a file inside the sandbox root (symlinks are not followed)."""
     try:
-        text = p.read_text(encoding="utf-8", errors="ignore")
-        if len(text) > MAX_OUTPUT:
-            text = text[:MAX_OUTPUT] + f"\n[truncated — {len(text)} chars total]"
-        return text
-    except Exception as e:
+        text = guard.read_text(path)
+    except guard.Refused as e:
+        return f"Refused: {e}"
+    except FileNotFoundError:
+        return f"File not found: {path}"
+    except OSError as e:
         return f"Error reading {path}: {e}"
+    if len(text) > MAX_OUTPUT:
+        text = text[:MAX_OUTPUT] + f"\n[truncated — {len(text)} chars total]"
+    return text
 
 
 def write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
+    """Write a file inside the sandbox root; '..', absolute paths outside it,
+    symlinks, hard links and .git/.venv/node_modules/.npmrc are refused."""
+    try:
+        guard.write_text(path, content)
+    except guard.Refused as e:
+        return f"Refused: {e}"
+    except OSError as e:
+        return f"Error writing {path}: {e}"
     return f"Written: {path} ({len(content)} chars)"
 
 
 def list_files(pattern: str) -> str:
-    matches = _glob.glob(pattern, recursive=True)
+    """Glob inside the sandbox root. The walk never enters symlinked dirs."""
+    try:
+        sandbox = guard.current()
+        parts = guard.relative_parts(sandbox, pattern)
+    except guard.Refused as e:
+        return f"Refused: {e}"
+    if not parts:
+        return f"No files matching: {pattern}"
+    root = str(sandbox.root)
+    absolute = os.path.isabs(os.path.expanduser(pattern))
+    matches = []
+    for rel, _is_dir in guard.walk(sandbox, root):
+        if guard.glob_match(parts, rel.split(os.sep)):
+            matches.append(os.path.join(root, rel) if absolute else rel)
+            if len(matches) >= 2000:
+                break
     return "\n".join(sorted(matches)) if matches else f"No files matching: {pattern}"
 
 
 def run_command(command: str, working_dir: Optional[str] = None) -> str:
-    cwd = Path(working_dir).expanduser() if working_dir else Path.cwd()
+    """Run one command through the LA-3 guard (agents/shared/guard.py):
+    shell=False, allowlist or the person's confirmation, cwd inside the root."""
     try:
-        result = subprocess.run(
-            command, shell=True, cwd=cwd,
-            capture_output=True, text=True, timeout=120
-        )
-        out = (result.stdout + result.stderr).strip()
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: command timed out after 120s"
-    except Exception as e:
-        return f"Error: {e}"
+        argv = guard.split_command(command)
+    except guard.Refused as e:
+        return f"Refused: {e}"
+    outcome = guard.run_argv(argv, working_dir)
+    if not outcome.ran:
+        return f"Refused: {outcome.reason}" if outcome.status != "timeout" \
+            else f"Error: command {outcome.reason}"
+    out = outcome.output
+    if len(out) > MAX_OUTPUT:
+        out = out[:MAX_OUTPUT] + "\n[truncated]"
+    out = out or "(no output)"
+    if outcome.returncode:
+        out += f"\n[exit code {outcome.returncode}]"
+    return out
+
+
+_SEARCH_EXTENSIONS = (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".html", ".md")
 
 
 def search_code(pattern: str, directory: str = ".") -> str:
+    """Case-insensitive literal search of source files inside the sandbox
+    root. Files are read through the guard (no symlinks, no hard links), and
+    symlinked dirs are not entered."""
     try:
-        result = subprocess.run(
-            ["grep", "-rn", "-i",
-             "--include=*.py", "--include=*.ts", "--include=*.tsx",
-             "--include=*.js", "--include=*.jsx", "--include=*.json",
-             "--include=*.css", "--include=*.html", "--include=*.md",
-             pattern, directory],
-            capture_output=True, text=True, timeout=10
-        )
-        out = result.stdout
-        if not out.strip():
-            return f"No matches for '{pattern}' in {directory}"
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out
-    except Exception as e:
-        return f"Error: {e}"
+        sandbox = guard.current()
+        if not isinstance(pattern, str) or "\x00" in pattern or not pattern:
+            raise guard.Refused("pattern must be a non-empty string without NUL bytes")
+        target = guard.resolve_dir(sandbox, directory)
+    except guard.Refused as e:
+        return f"Refused: {e}"
+    needle = pattern.casefold()
+    root = str(sandbox.root)
+    lines, size = [], 0
+    for rel, is_dir in guard.walk(sandbox, target):
+        if is_dir or not rel.endswith(_SEARCH_EXTENSIONS):
+            continue
+        try:
+            text = guard.read_text(os.path.join(root, rel))
+        except (guard.Refused, OSError):
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if needle in line.casefold():
+                hit = f"{os.path.join(root, rel)}:{n}:{line}"
+                lines.append(hit)
+                size += len(hit) + 1
+        if size > MAX_OUTPUT:
+            break
+    if not lines:
+        return f"No matches for '{pattern}' in {directory}"
+    out = "\n".join(lines)
+    if len(out) > MAX_OUTPUT:
+        out = out[:MAX_OUTPUT] + "\n[truncated]"
+    return out
 
 
 def grep_repos(keywords: list, repos_dir: str = None) -> str:
@@ -204,20 +252,45 @@ def search_github(query: str, language: Optional[str] = None,
         if desc:
             lines.append(f"    {desc}")
         lines.append(f"    {d['url']}")
-    return "\n".join(lines)
+    return wrap_untrusted("\n".join(lines), f"search_github {query}")
 
 
-def peek_readme(repo_url: str) -> str:
-    """Fetch a repo's README without cloning. Use this to decide if a repo
-    found via search_github is worth shallow-cloning. Owner/repo can be the
-    full URL (https://github.com/owner/repo) or just owner/repo."""
+_GH_NAME = re.compile(r"[A-Za-z0-9_.-]{1,100}")
+
+
+def _owner_repo(repo_url: str) -> Optional[tuple[str, str]]:
+    """Parse owner/repo from a URL or 'owner/repo'; None unless both are plain
+    GitHub names (so neither can be '..', a path or an option)."""
+    if not isinstance(repo_url, str):
+        return None
     if repo_url.startswith("http"):
         parts = repo_url.rstrip("/").split("github.com/")[-1].split("/")
     else:
         parts = repo_url.strip().split("/")
     if len(parts) < 2:
+        return None
+    owner, repo = parts[0], parts[1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    for name in (owner, repo):
+        if not _GH_NAME.fullmatch(name) or name in (".", "..") or name.startswith("-"):
+            return None
+    return owner, repo
+
+
+def peek_readme(repo_url: str) -> str:
+    """Fetch a repo's README without cloning, wrapped as untrusted data."""
+    return wrap_untrusted(_peek_readme(repo_url), f"peek_readme {repo_url}")
+
+
+def _peek_readme(repo_url: str) -> str:
+    """Fetch a repo's README without cloning. Use this to decide if a repo
+    found via search_github is worth shallow-cloning. Owner/repo can be the
+    full URL (https://github.com/owner/repo) or just owner/repo."""
+    parsed = _owner_repo(repo_url)
+    if parsed is None:
         return f"Could not parse owner/repo from {repo_url!r}"
-    owner, repo = parts[0], parts[1].replace(".git", "")
+    owner, repo = parsed
 
     if _gh_cli_available():
         try:
@@ -261,19 +334,22 @@ def peek_readme(repo_url: str) -> str:
 
 
 def clone_shallow(repo_url: str) -> str:
+    """Shallow-clone a repo (see _clone_shallow); the result is wrapped as
+    untrusted data because it can carry git's stderr from a remote."""
+    return wrap_untrusted(_clone_shallow(repo_url), f"clone_shallow {repo_url}")
+
+
+def _clone_shallow(repo_url: str) -> str:
     """Shallow-clone a repo into ~/.local-ai/repos-discovered/ so grep_repos
     can search it for code patterns. Idempotent: re-runs are no-ops.
 
     Use this AFTER peek_readme has confirmed the repo is relevant. Don't
     clone repos you haven't peeked.
     """
-    if repo_url.startswith("http"):
-        parts = repo_url.rstrip("/").split("github.com/")[-1].split("/")
-    else:
-        parts = repo_url.strip().split("/")
-    if len(parts) < 2:
+    parsed = _owner_repo(repo_url)
+    if parsed is None:
         return f"Could not parse owner/repo from {repo_url!r}"
-    owner, repo = parts[0], parts[1].replace(".git", "")
+    owner, repo = parsed
     canonical = f"https://github.com/{owner}/{repo}.git"
 
     REPOS_DISCOVERED.mkdir(parents=True, exist_ok=True)
@@ -316,19 +392,30 @@ def make_tool(name: str, description: str, properties: dict, required: list) -> 
 READ_FILE   = make_tool("read_file",   "Read a file's contents.",
                         {"path": {"type": "string"}}, ["path"])
 
-WRITE_FILE  = make_tool("write_file",  "Write content to a file (creates dirs).",
+WRITE_FILE  = make_tool("write_file",
+                        "Write content to a file inside the project directory (creates dirs). "
+                        "Paths outside it, symlinks, and .git/.venv/node_modules/.npmrc are refused.",
                         {"path": {"type": "string"}, "content": {"type": "string"}},
                         ["path", "content"])
 
 LIST_FILES  = make_tool("list_files",  "List files matching a glob pattern.",
                         {"pattern": {"type": "string"}}, ["pattern"])
 
-RUN_COMMAND = make_tool("run_command", "Run a shell command and return output.",
-                        {"command": {"type": "string"},
-                         "working_dir": {"type": "string", "description": "Optional CWD"}},
+RUN_COMMAND = make_tool(
+    "run_command",
+    ("Run ONE command (no shell: no pipes, redirects, '&&' or ';') inside the project "
+     "directory and return its output. Runs without asking: `python3 -m pytest`, "
+     "`python3 -m unittest`, `python3 -m py_compile <file>`, `pytest`, `python3 -m venv .venv`, "
+     "`npm test`, `node <script>`, `ls`, `cat`, `git status|diff|init|add|commit -m`. "
+     "`pip install` goes into the project's .venv (create it first) and, like any other "
+     "command, needs the person's confirmation; it is refused when nobody can confirm."),
+    {"command": {"type": "string"},
+     "working_dir": {"type": "string",
+                     "description": "Optional directory inside the project"}},
                         ["command"])
 
-SEARCH_CODE = make_tool("search_code", "Search for a pattern across source files.",
+SEARCH_CODE = make_tool("search_code",
+                        "Search source files in the project for a literal text (case-insensitive).",
                         {"pattern": {"type": "string"},
                          "directory": {"type": "string", "description": "Directory to search"}},
                         ["pattern"])

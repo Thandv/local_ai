@@ -16,6 +16,7 @@ from pathlib import Path
 from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
+from local_ai.agents.shared import guard
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
 )
@@ -24,10 +25,11 @@ SYSTEM_PROMPT = """You are an expert AI coding assistant running locally on the 
 You help write, debug, refactor, and build complete software applications.
 
 You have access to these tools:
-- read_file(path): Read a file's contents
-- write_file(path, content): Write content to a file (creates dirs if needed)
+- read_file(path): Read a file's contents (inside this directory)
+- write_file(path, content): Write content to a file inside this directory (creates dirs)
 - list_files(pattern): List files matching a glob pattern (e.g. "src/**/*.py")
-- run_command(command): Execute a shell command and return its output
+- run_command(command): Run ONE command (no shell: no pipes, redirects or '&&') in this
+  directory; commands off the allowlist need the user's confirmation
 - search_code(pattern, directory): Search for a text pattern across files
 
 Rules:
@@ -63,11 +65,15 @@ def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(prog="ai", add_help=False)
     parser.add_argument("--model", "-m", default=None)
+    parser.add_argument("--yes-unsafe", action="store_true")
     args, _ = parser.parse_known_args()
     if args.model:
         set_model(args.model)
 
     project_dir = Path.cwd()
+    # File and command tools are confined to the current directory; only the
+    # person's --yes-unsafe flag skips the confirmation for unlisted commands.
+    guard.activate(project_dir, yes_unsafe=args.yes_unsafe)
     print(f"\n  Local AI Coding Agent")
     print(f"  Model : {get_model()}")
     print(f"  Project: {project_dir}")
