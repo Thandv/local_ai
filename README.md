@@ -102,8 +102,12 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
 - **Installs.** `pip` runs only as `ROOT/.venv/bin/python -m pip` (the model
   creates the venv with `python3 -m venv .venv`), never the PATH interpreter;
   options that install elsewhere (`--user`, `--target`, `--prefix`, ...) are
-  refused, also on every line of a `-r`/`-c` requirements file (which may
-  not use `${VAR}` expansion). `npm install` runs only next
+  refused. Package specs, on the command line and on every line of a `-r`/`-c`
+  requirements file, must match a strict allowlist: `name[extras]` with
+  version specifiers and an optional marker, `name @ https://...`,
+  `git+https://...`, or a plain relative path inside the build. `file:` URLs,
+  other schemes, `${VAR}`, unusual encodings and backslashes other than a
+  trailing ` \` are refused rather than interpreted. `npm install` runs only next
   to a package.json in the working dir; `-g`, `-C`, `--global`, `--prefix`
   and similar options are refused in any npm command. Both always need the confirmation (or
   `--yes-unsafe`), so a build with no TTY installs nothing.

@@ -38,8 +38,6 @@ import stat
 import subprocess
 import sys
 import unicodedata
-import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
@@ -716,103 +714,133 @@ _PIP_PATH_OPTS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable
 _PIP_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--format"}
 
 
+# pip requirement specs and requirements files are checked against a strict
+# allowlist grammar instead of re-implementing pip's parser: anything that
+# does not match (unusual URL schemes, odd characters in paths, encodings,
+# backslash tricks, ${VAR}) is refused, never interpreted.
+_SAFE_PATH = re.compile(r"(\.|\.\.|[A-Za-z0-9_][A-Za-z0-9_.+-]*)(/(\.|\.\.|[A-Za-z0-9_][A-Za-z0-9_.+-]*))*/?")
+_EXTRAS = r"(\[[A-Za-z0-9_.,-]+\])?"
+_REQ_NAME_SPEC = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS +
+    r"(\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+(\s*,\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+)*)?")
+_REQ_URL = re.compile(r"https?://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
+_REQ_VCS = re.compile(r"git\+https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
+_REQ_MARKER = re.compile(r"[A-Za-z0-9_.'\"<>=!~ ()-]+")
 _REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
                 "--only-binary", "--no-binary", "--require-hashes", "--hash",
                 "--config-settings"}
+_REQ_VALUE_OPTS = {"-i", "--index-url", "--extra-index-url", "--only-binary", "--no-binary",
+                   "--hash", "--config-settings"}
 
 
-def _local_path_of(spec: str) -> Optional[str]:
-    """The local path a pip spec or npm spec names, if any: a 'file:' URL,
-    `name @ file:///...`, or something that looks like a path."""
-    m = re.search(r"file:[^\s;]*", spec)
-    if m:
-        # as pip's url_to_path: a 'localhost' authority is local, %-escapes
-        # are decoded; any other host is refused by returning '/'.
-        parts = urllib.parse.urlsplit(m.group(0))
-        if parts.netloc not in ("", "localhost"):
-            return "/"
-        return urllib.request.url2pathname(parts.path) or "."
-    head = spec.split(";")[0].strip()
-    if "://" in head:
-        return None
-    if head.startswith((".", "/", "~")) or "/" in head:
-        return head
-    return None
+def _check_local_path(sandbox: Sandbox, base: str, path: str, what: str) -> None:
+    if not _SAFE_PATH.fullmatch(path) or not _path_ok(sandbox, base, path):
+        raise Refused(f"{what} {path!r} must be a plain relative path inside the build dir")
+
+
+def _check_pip_spec(sandbox: Sandbox, cwd: str, spec: str, *, editable: bool = False) -> None:
+    """One requirement: `name[extras] <specifiers> [; marker]`, `name @ https://...`,
+    `git+https://...` (editable), or a plain relative path inside the build dir.
+    Everything else (file:, git+file:, other schemes, ';' in paths, ...) is refused."""
+    if editable:
+        if _REQ_VCS.fullmatch(spec):
+            return
+        base, _, extras = spec.partition("[")
+        if extras and not re.fullmatch(r"[A-Za-z0-9_.,-]+\]", extras):
+            raise Refused(f"editable {spec!r} is not a plain path")
+        _check_local_path(sandbox, cwd, base, "editable path")
+        return
+    req, sep, marker = spec.partition("; ")
+    if sep and not _REQ_MARKER.fullmatch(marker.strip()):
+        raise Refused(f"requirement marker {marker!r} is not allowed")
+    req = req.strip()
+    if _REQ_NAME_SPEC.fullmatch(req) or _REQ_VCS.fullmatch(req):
+        return
+    name, at, url = req.partition(" @ ")
+    if at and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS, name.strip()) \
+            and _REQ_URL.fullmatch(url.strip()):
+        return
+    if (req.startswith(".") or "/" in req) and _SAFE_PATH.fullmatch(req):
+        _check_local_path(sandbox, cwd, req, "requirement path")
+        return
+    raise Refused(f"requirement {spec!r} is not a plain name, https URL or path in the build dir")
+
+
+def _read_requirements(sandbox: Sandbox, path: str) -> str:
+    real = os.path.realpath(path)
+    if not is_inside(sandbox, real) or not _single_link_file(path):
+        raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
+    with open(real, "rb") as f:
+        data = f.read(1_000_001)
+    if len(data) > 1_000_000:
+        raise Refused("requirements file is too large")
+    try:
+        text = data.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise Refused("requirements file must be plain UTF-8")
+    if text.startswith("﻿") or "\x00" in text:
+        raise Refused("requirements file must be plain UTF-8 (no BOM, no NUL)")
+    if any(re.search(r"coding[:=]", line) for line in text.splitlines()[:2]):
+        raise Refused("requirements file may not declare an encoding")
+    return text
 
 
 def _join_requirement_lines(text: str) -> list:
-    """pip's line handling: drop comments, join backslash continuations."""
+    """Joined logical lines. The only backslash allowed is a single one that
+    ends a line after a space (pip-compile's hash layout)."""
     lines, current = [], ""
     for raw in text.splitlines():
-        line = re.sub(r"(^|\s)#.*$", "", raw)
-        if line.endswith("\\"):
-            current += line[:-1]  # pip joins continuations with no space
+        body = raw[:-1] if raw.endswith(" \\") else raw
+        if "\\" in body:
+            raise Refused("requirements files may use '\\' only as ' \\' at a line end")
+        if raw.endswith(" \\"):
+            current += body
             continue
-        current += line
-        if current.strip():
-            lines.append(current.strip())
+        current += raw
+        line = re.sub(r"(^|\s)#.*$", "", current).strip()
+        if "${" in line:
+            raise Refused("requirements files may not use ${VAR} expansion")
+        if line:
+            lines.append(line)
         current = ""
     if current.strip():
-        lines.append(current.strip())
+        raise Refused("requirements file ends with a continuation")
     return lines
 
 
 def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) -> None:
-    """Apply the pip path rules to every line of a requirements/constraints
-    file too (the confirmation prompt shows only `-r <file>`). As in pip,
-    nested -r/-c paths are relative to the file, -e and bare paths to the cwd."""
+    """Every line of a requirements/constraints file must pass the same
+    allowlist (the confirmation prompt shows only `-r <file>`). Nested -r/-c
+    paths are relative to the file; -e and bare paths to the cwd (as in pip)."""
     if depth > 3:
         raise Refused("requirements files nest too deeply")
-    real = os.path.realpath(path)
-    if not is_inside(sandbox, real) or not _single_link_file(path):
-        raise Refused(f"requirements file {path!r} must be a plain file inside the build dir")
-    with open(real, "r", encoding="utf-8", errors="replace") as f:
-        text = f.read(1_000_000)
-    base = os.path.dirname(real)
+    text = _read_requirements(sandbox, path)
+    base = os.path.dirname(os.path.realpath(path))
     for line in _join_requirement_lines(text):
-        if re.search(r"\$\{[A-Z0-9_]+\}", line):
-            raise Refused("requirements files may not use ${VAR} expansion")
-        # as pip's break_args_options: the requirement is everything before
-        # the first word starting with '-'; the rest are options.
-        words = line.split(" ")
+        words = line.split()
         k = next((j for j, w in enumerate(words) if w.startswith("-")), len(words))
-        requirement = " ".join(words[:k]).strip()
-        try:
-            tokens = shlex.split(" ".join(words[k:]))
-        except ValueError:
-            raise Refused(f"cannot parse requirements line {line!r}")
-        if requirement:
-            local = _local_path_of(requirement)
-            if local is not None and not _path_ok(sandbox, cwd, local):
-                raise Refused(f"requirements line {line!r} points outside the build dir")
+        if k:
+            _check_pip_spec(sandbox, cwd, " ".join(words[:k]))
+        opts = words[k:]
         i = 0
-        while i < len(tokens):
-            name, eq, value = tokens[i].partition("=")
-            if name.startswith("-") and not name.startswith("--") and len(name) > 2 \
-                    and not eq:
-                name, value, eq = name[:2], name[2:], "="  # -e/path, -r file
-            needs_value = name in _PIP_PATH_OPTS or name in ("-i", "--index-url",
-                                                               "--extra-index-url",
-                                                               "--only-binary", "--no-binary",
-                                                               "--hash", "--config-settings")
-            if needs_value and not eq:
-                if i + 1 >= len(tokens):
-                    raise Refused(f"requirements option {name!r} needs a value")
-                i += 1
-                value = tokens[i]
+        while i < len(opts):
+            name, eq, value = opts[i].partition("=")
+            if re.fullmatch(r"-[rce].+", name) and not eq:
+                name, value, eq = name[:2], name[2:], "="  # -rfile, -e.
+            if name in ("-r", "--requirement", "-c", "--constraint", "-e", "--editable") \
+                    or name in _REQ_VALUE_OPTS:
+                if not eq:
+                    if i + 1 >= len(opts):
+                        raise Refused(f"requirements option {name!r} needs a value")
+                    i += 1
+                    value = opts[i]
             if name in ("-r", "--requirement", "-c", "--constraint"):
-                if not _path_ok(sandbox, base, value):
-                    raise Refused(f"requirements line {line!r} points outside the build dir")
+                _check_local_path(sandbox, base, value, "requirements file")
                 _check_requirements(sandbox, cwd, os.path.join(base, value), depth=depth + 1)
             elif name in ("-e", "--editable"):
-                local = _local_path_of(value) if not value.startswith(("git+", "hg+", "svn+",
-                                                                       "bzr+")) else None
-                if local is None and "://" not in value:
-                    local = value
-                if local is not None and not _path_ok(sandbox, cwd, local):
-                    raise Refused(f"requirements line {line!r} points outside the build dir")
+                _check_pip_spec(sandbox, cwd, value, editable=True)
             elif name not in _REQ_OPTS_OK:
-                raise Refused(f"requirements option {name!r} is not allowed")
+                raise Refused(f"requirements option {opts[i]!r} is not allowed")
             i += 1
 
 
@@ -836,15 +864,16 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
                     raise Refused(f"pip option {a!r} needs a value")
                 i += 1
                 value = args[i]
-            if name in _PIP_PATH_OPTS and not _path_ok(sandbox, cwd, value):
-                raise Refused(f"pip {name} {value!r} must be a path inside the build dir")
             if name in ("-r", "--requirement", "-c", "--constraint"):
+                _check_local_path(sandbox, cwd, value, "requirements file")
                 _check_requirements(sandbox, cwd, os.path.join(cwd, value), depth=0)
+            elif name in ("-e", "--editable"):
+                _check_pip_spec(sandbox, cwd, value, editable=True)
         elif a.startswith("-"):
             raise Refused(f"pip option {a!r} is not allowed (installs must stay in "
                           f"{VENV_DIR})")
-        elif _local_path_of(a) is not None and not _path_ok(sandbox, cwd, _local_path_of(a)):
-            raise Refused(f"pip path {a!r} must be inside the build dir")
+        elif args[0] in ("install", "uninstall", "show"):
+            _check_pip_spec(sandbox, cwd, a)
         i += 1
     python = os.path.join(venv, "bin", "python")
     return _Plan([python, "-m", "pip", *args],
