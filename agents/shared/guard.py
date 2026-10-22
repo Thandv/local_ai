@@ -722,14 +722,24 @@ def _venv_program(sandbox: Sandbox, cwd: str, prog: str) -> Optional[str]:
 
 def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
     prog, args = argv[0], argv[1:]
+    forced = None  # an explicit ROOT/.venv/bin/<name> runs exactly that file
     if "/" in prog:
         name = _venv_program(sandbox, cwd, prog)
         if name is None:
             raise Refused(f"{prog!r}: only programs on PATH (or this build's "
                           f"{VENV_DIR}/bin) can be run")
-        if not venv_dir(sandbox):
+        venv = venv_dir(sandbox)
+        if not venv:
             raise Refused(f"{prog!r}: this build has no {VENV_DIR} yet")
+        forced = os.path.join(venv, "bin", name)
         prog = name
+
+    def exe(name: str) -> str:
+        if forced is None:
+            return _program(sandbox, name)
+        if not os.path.isfile(forced):
+            raise Refused(f"{argv[0]!r} does not exist")
+        return forced
 
     if _PYTHON_NAME.fullmatch(prog):
         if len(args) >= 2 and args[0] == "-m":
@@ -743,7 +753,7 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
                                   f"python3 -m venv {VENV_DIR} (in the build root)")
                 base = _program(sandbox, "python3", use_venv=False)
                 return _Plan([base, "-m", "venv", os.path.join(str(sandbox.root), VENV_DIR)])
-            python = _program(sandbox, prog)
+            python = exe(prog)
             if module == "pytest" and _pytest_args_ok(sandbox, cwd, margs):
                 return _Plan([python, "-m", "pytest", *margs])
             if module == "unittest" and _unittest_args_ok(sandbox, cwd, margs):
@@ -751,14 +761,13 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
             if module == "py_compile" and margs and all(
                     not a.startswith("-") and _path_ok(sandbox, cwd, a) for a in margs):
                 return _Plan([python, "-m", "py_compile", *margs])
-        return _Plan([_program(sandbox, prog), *args],
+        return _Plan([exe(prog), *args],
                      confirm="python runs only `-m pytest`, `-m unittest` or `-m py_compile` "
                              "without confirmation")
     if prog in ("pip", "pip3"):
         return _pip_plan(sandbox, cwd, args)
     if prog == "pytest":
-        exe = _program(sandbox, "pytest")
-        return _Plan([exe, *args], confirm="" if _pytest_args_ok(sandbox, cwd, args)
+        return _Plan([exe("pytest"), *args], confirm="" if _pytest_args_ok(sandbox, cwd, args)
                      else "these pytest options are not on the allowlist")
     if prog == "npm":
         return _npm_plan(sandbox, cwd, args)

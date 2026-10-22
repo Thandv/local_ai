@@ -511,6 +511,13 @@ class RunCommandAllowedTests(SandboxCase):
             tools.run_command("python3 -m pytest")
         self.assertTrue(seen[0].startswith(str(venv / "bin") + os.pathsep), seen)
 
+    def test_an_explicit_venv_program_runs_exactly_that_file(self) -> None:
+        venv = self.make_venv()
+        tools.run_command(".venv/bin/python -m unittest")
+        self.assertEqual(self.run_argv(), [str(venv / "bin" / "python"), "-m", "unittest"])
+        self.run_mock.reset_mock()
+        self.assertNotRun(".venv/bin/pytest")  # not installed in the venv
+
     def test_venv_is_created_with_the_base_interpreter_at_the_root(self) -> None:
         tools.run_command("python3 -m venv .venv")
         self.assertEqual(self.run_argv(), ["/usr/bin/python3", "-m", "venv",
