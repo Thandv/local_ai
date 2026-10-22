@@ -75,9 +75,9 @@ def _main() -> None:
         metavar="MODEL",
         help=(
             "LLM backend and model. Examples: "
-            "qwen2.5-coder:32b (default Ollama), "
-            "claude-opus-4-7 (best, needs ANTHROPIC_API_KEY), "
-            "llama3.3:70b"
+            "qwen2.5-coder:7b (default, Ollama), "
+            "any other pulled Ollama tag such as llama3.3:70b, "
+            "or a name starting with 'claude' (Claude API, needs ANTHROPIC_API_KEY)"
         ),
     )
 

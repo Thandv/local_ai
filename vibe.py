@@ -5,8 +5,9 @@ Powered by Ollama or Claude API + live grep-based retrieval from
 cloned open-source repos. No vector DB required — just fast, precise search.
 
 Model: set LOCAL_AI_MODEL env var or use --model flag.
-  Local (default): qwen2.5-coder:32b via Ollama
-  Cloud  (best):   claude-opus-4-7 (set ANTHROPIC_API_KEY)
+  Local (default): qwen2.5-coder:7b via Ollama
+  Cloud:           a model name starting with "claude" (Claude API; needs the
+                   [claude] extra and ANTHROPIC_API_KEY)
 """
 
 import os

@@ -2,8 +2,10 @@
 Multi-backend LLM client: Ollama (local) or Claude API (cloud).
 
 Select via LOCAL_AI_MODEL env var or set_model() / --model flag:
-  Ollama (default):  qwen2.5-coder:32b
-  Claude (best):     claude-opus-4-7   (requires ANTHROPIC_API_KEY)
+  Ollama (default):  qwen2.5-coder:7b (if it is not pulled, a pulled tag of
+                     the same family is used instead, with a notice)
+  Claude:            a model name starting with "claude" (requires the
+                     anthropic package and ANTHROPIC_API_KEY)
 
 Both backends stream tokens to stdout and return the same message dict.
 """
@@ -81,7 +83,7 @@ def _resolve_active_model() -> None:
         _MODEL_RESOLVED = True
         return
 
-    # Fall back: prefer same family (e.g. qwen2.5-coder:* if asked for qwen2.5-coder:32b)
+    # Fall back: prefer the same family (e.g. another pulled qwen2.5-coder:* tag)
     family = _ACTIVE_MODEL.split(":")[0]
     family_matches = [m for m in available if m.startswith(family + ":")]
     if family_matches:
