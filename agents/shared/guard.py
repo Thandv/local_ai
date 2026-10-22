@@ -723,7 +723,7 @@ _EXTRAS = r"(\[[A-Za-z0-9_.,-]+\])?"
 _REQ_NAME_SPEC = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS +
     r"(\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+(\s*,\s*(===|==|!=|~=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+)*)?")
-_REQ_URL = re.compile(r"https?://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
+_REQ_URL = re.compile(r"https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
 _REQ_VCS = re.compile(r"git\+https://[A-Za-z0-9._~:/?#@!&'()*+,=%-]+")
 _REQ_MARKER = re.compile(r"[A-Za-z0-9_.'\"<>=!~ ()-]+")
 _REQ_OPTS_OK = {"-i", "--index-url", "--extra-index-url", "--pre", "--prefer-binary",
@@ -745,8 +745,9 @@ _SUBDIR = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)
 
 def _url_ok(url: str, pattern) -> bool:
     """An allowed URL whose #subdirectory= (pip joins it onto the unpacked
-    dir unchecked) is a plain relative path with no '..'."""
-    if not pattern.fullmatch(url):
+    dir unchecked) is a plain relative path with no '..', and with no '.' or
+    '..' segment (pip first tries `name @ <url>` as a normpath'd local path)."""
+    if not pattern.fullmatch(url) or re.search(r"(^|/)\.\.?($|[/?#])", url):
         return False
     return all(_SUBDIR.fullmatch(v) and ".." not in v.split("/")
                for v in re.findall(r"[#&]subdirectory=([^&]*)", url))
@@ -780,7 +781,8 @@ def _check_pip_spec(sandbox: Sandbox, cwd: str, spec: str, *, editable: bool = F
     if at and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*" + _EXTRAS, name.strip()) \
             and _REQ_URL.fullmatch(url.strip()):
         if not _url_ok(url.strip(), _REQ_URL):
-            raise Refused(f"{spec!r}: #subdirectory= must be a plain relative path")
+            raise Refused(f"{spec!r}: no '.' or '..' segments, and #subdirectory= "
+                          "must be a plain relative path")
         return
     if (req.startswith(".") or "/" in req) and _SAFE_PATH.fullmatch(req):
         _check_local_path(sandbox, cwd, req, "requirement path")
@@ -803,6 +805,9 @@ def _read_requirements(sandbox: Sandbox, path: str) -> str:
     if text.startswith("﻿") or "\x00" in text:
         raise Refused("requirements file must be plain UTF-8 (no BOM, no NUL)")
     if any(re.search(r"coding[:=]", line) for line in text.splitlines()[:2]):
+        raise Refused("requirements file may not declare an encoding")
+    if any(re.search(rb"coding[:=]", line) for line in data.split(b"\n")[:2]):
+        # pip looks for PEP 263 in the first two b"\n" lines, not splitlines()
         raise Refused("requirements file may not declare an encoding")
     return text
 
@@ -850,6 +855,9 @@ def _check_requirements(sandbox: Sandbox, cwd: str, path: str, *, depth: int) ->
         i = 0
         while i < len(opts):
             name, eq, value = opts[i].partition("=")
+            if eq and not name.startswith("--"):
+                # optparse gives `-r=x` the value "=x", not "x"
+                raise Refused(f"requirements option {opts[i]!r}: write a short option without '='")
             if re.fullmatch(r"-[rce].+", name) and not eq:
                 name, value, eq = name[:2], name[2:], "="  # -rfile, -e.
             if name in ("-r", "--requirement", "-c", "--constraint", "-e", "--editable") \
@@ -879,10 +887,23 @@ def _pip_plan(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> _Plan:
     if not args or args[0] not in _PIP_SUBCOMMANDS:
         raise Refused(f"pip subcommand {args[0] if args else '(none)'!r} is not allowed; "
                       f"use one of {sorted(_PIP_SUBCOMMANDS)}")
+    if args[0] == "install":
+        try:
+            odd = [n for n in os.listdir(cwd) if ":" in n]
+        except OSError:
+            odd = ["(unreadable)"]
+        if odd:
+            # pip tries an index URL ("https://...") and `name @ https://...`
+            # as paths relative to its cwd before it treats them as URLs.
+            raise Refused(f"pip install will not run next to {odd[0]!r}: pip would read "
+                          "a name with ':' as a local index or package")
     i = 1
     while i < len(args):
         a = args[i]
         name, eq, value = a.partition("=")
+        if a.startswith("-") and not a.startswith("--") and eq:
+            # optparse gives `-r=x` the value "=x", not "x"
+            raise Refused(f"pip option {a!r}: write a short option without '='")
         if a in _PIP_FLAGS:
             pass
         elif name in _PIP_PATH_OPTS or name in _PIP_VALUE_OPTS:
