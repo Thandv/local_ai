@@ -106,8 +106,8 @@ decides it:
 | `FAILED`     | A required stage (Architect, Coder or Tester) raised, or any stage hit `LLMUnavailableError`. The pipeline stops there and no later stage runs. |
 
 Any other stage that raises prints a warning, is recorded in `stage_errors`,
-and the pipeline continues. `build-app` exits with status 1 when the verdict
-is `FAILED` and 0 otherwise. `build-app --resume DIR` skips the stages listed
+and the pipeline continues. A build or `--resume` run of `build-app` exits
+with status 1 when the verdict is `FAILED` and 0 otherwise. `build-app --resume DIR` skips the stages listed
 in `completed_stages`; a stage that raised is not listed, so a resume retries
 it.
 

@@ -347,7 +347,8 @@ def dispatch_tool_call(name: str, raw_args: Any, handlers: ToolHandlers) -> str:
     except TypeError as e:
         return f"Error: invalid arguments for {name}: {e}"
     for key, value in args.items():
-        if signature.parameters[key].annotation is str and not isinstance(value, str):
+        param = signature.parameters.get(key)  # absent when bound via **kwargs
+        if param is not None and param.annotation is str and not isinstance(value, str):
             return (f"Error: invalid arguments for {name}: "
                     f"{key} must be a string, got {type(value).__name__}")
     return handler(**args)

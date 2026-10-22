@@ -255,6 +255,8 @@ class StageFailureTests(PipelineCase):
 class ReviewFollowUpPipelineTests(PipelineCase):
     """Verdict on resume, the checkpoint/verdict contract and build-app's exit status."""
 
+    tester_passes = True
+
     def _fake(self, name: str) -> Callable[[Project], Project]:
         inner = super()._fake(name)
 
@@ -266,7 +268,7 @@ class ReviewFollowUpPipelineTests(PipelineCase):
                 for f in ("app.py", "util.py"):
                     (project.output_dir / f).write_text("x = 1\n" * 20, encoding="utf-8")
             if name == "tester":
-                project.success = True
+                project.success = self.tester_passes
             return project
         return stage
 
@@ -315,3 +317,46 @@ class ReviewFollowUpPipelineTests(PipelineCase):
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             build_cli.main()
         self.assertEqual(self._log()["verdict"], "SUCCESS")
+
+    def _build_app(self, argv: list[str]) -> None:
+        with contextlib.ExitStack() as stack:
+            for name in STAGES:
+                stack.enter_context(mock.patch.object(
+                    getattr(orchestrator, name), "run", self._fake(name)))
+            stack.enter_context(mock.patch("sys.argv", argv))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+            build_cli.main()
+
+    def test_resume_after_an_outage_keeps_the_tester_result(self) -> None:
+        self.failing = {"auditor": LLMUnavailableError("invented: backend is down")}
+        project, _ = self._build()
+        self.assertEqual(project.verdict, Verdict.FAILED)
+        self.failing = {}
+        self.called = []
+        project, _ = self._run(instruction="", resume_dir=self.out)
+        self.assertEqual(self.called, STAGES[STAGES.index("auditor"):])
+        self.assertEqual(project.verdict, Verdict.SUCCESS)
+
+    def test_resume_after_a_failing_tester_is_not_success(self) -> None:
+        self.tester_passes = False
+        project, _ = self._build()
+        self.assertEqual(project.verdict, Verdict.INCOMPLETE)
+        project, _ = self._run(instruction="", resume_dir=self.out)
+        self.assertEqual(project.verdict, Verdict.INCOMPLETE)
+        self.assertEqual(project.success_reason, "test gate did not pass")
+
+    def test_build_app_resume_exits_nonzero_when_failed(self) -> None:
+        self._build()
+        log = self._log()
+        log["completed_stages"] = STAGES[:STAGES.index("coder")]
+        (self.out / "BUILD_LOG.json").write_text(json.dumps(log), encoding="utf-8")
+        self.failing = {"coder": RuntimeError("invented coder crash")}
+        with self.assertRaises(SystemExit) as cm:
+            self._build_app(["build-app", "--resume", str(self.out)])
+        self.assertIn("coder stage raised", str(cm.exception.code))
+
+    def test_build_app_exits_zero_when_incomplete(self) -> None:
+        self.tester_passes = False
+        self._build_app(["build-app", "--out", str(self.out), "invented habit tracker"])
+        self.assertEqual(self._log()["verdict"], "INCOMPLETE")

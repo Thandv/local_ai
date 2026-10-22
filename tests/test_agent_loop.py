@@ -221,3 +221,20 @@ class ReviewFollowUpLoopTests(support.GuardedTestCase):
         reply = self._loop(fake, [{"role": "user", "content": "go"}], max_rounds=3)
         self.assertTrue(llm.stopped_at_round_limit(reply))
         self.assertFalse(llm.stopped_at_round_limit("all tests passed"))
+
+    def test_non_string_scalars_for_a_string_argument_are_errors(self) -> None:
+        for value, kind in ((3, "int"), (["a"], "list"), (None, "NoneType")):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    llm.dispatch_tool_call("write_file", {"path": "a", "content": value},
+                                           self.handlers),
+                    f"Error: invalid arguments for write_file: "
+                    f"content must be a string, got {kind}")
+        self.assertEqual(self.written, [])
+
+    def test_extra_keyword_for_a_kwargs_handler_is_passed_through(self) -> None:
+        def flexible(path: str, **extra: object) -> str:
+            return f"{path} {sorted(extra)}"
+
+        self.assertEqual(llm.dispatch_tool_call(
+            "flexible", {"path": "a", "mode": 1}, {"flexible": flexible}), "a ['mode']")
