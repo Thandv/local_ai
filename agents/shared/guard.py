@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import fnmatch
 import json
 import os
 import re
@@ -49,8 +50,9 @@ MAX_READ_BYTES = 2_000_000
 
 # Names write_file may never create or write through (compared casefolded,
 # because APFS is case-insensitive by default): git hooks/config, the build
-# venv's interpreters and pip config, installed packages, npm config.
-PROTECTED_NAMES = frozenset({".git", VENV_DIR, "node_modules", ".npmrc"})
+# venv's interpreters and pip config, installed packages, npm config, and
+# files other tools run on their own (direnv's .envrc, VS Code tasks).
+PROTECTED_NAMES = frozenset({".git", VENV_DIR, "node_modules", ".npmrc", ".envrc", ".vscode"})
 
 # Environment variables a command keeps; everything else (API keys, PYTHON*,
 # NODE_OPTIONS, GIT_*, npm_config_*, LD_*/DYLD_*) is dropped.
@@ -189,6 +191,10 @@ def _open_file(sandbox: Sandbox, path: str, *, write: bool) -> int:
     parts = relative_parts(sandbox, path)
     if not parts:
         raise Refused(f"{path!r} is the root directory itself, not a file")
+    if path.rstrip().endswith((os.sep, os.sep + ".")):
+        raise Refused(f"{path!r} names a directory, not a file")
+    if any(len(p.encode("utf-8", "surrogateescape")) > 255 for p in parts):
+        raise Refused(f"{path!r} has a path component longer than 255 bytes")
     if write:
         bad = next((p for p in parts if _is_protected(p)), None)
         if bad is not None:
@@ -245,6 +251,50 @@ def resolve_dir(sandbox: Sandbox, path: Optional[str]) -> str:
     if not os.path.isdir(real):
         raise Refused(f"{path!r} is not a directory")
     return real
+
+
+MAX_WALK_ENTRIES = 20_000
+
+
+def walk(sandbox: Sandbox, start: str):
+    """Yield (relative path, is_dir) for entries below directory `start`
+    (a real path inside the root). Symlinked dirs are listed but never
+    entered, and the walk stops after MAX_WALK_ENTRIES entries."""
+    count = 0
+    root = str(sandbox.root)
+    for dirpath, dirnames, filenames in os.walk(start, followlinks=False):
+        if not is_inside(sandbox, os.path.realpath(dirpath)):
+            dirnames[:] = []
+            continue
+        dirnames.sort()
+        for name in dirnames:
+            yield os.path.relpath(os.path.join(dirpath, name), root), True
+        for name in sorted(filenames):
+            yield os.path.relpath(os.path.join(dirpath, name), root), False
+        count += len(dirnames) + len(filenames)
+        if count >= MAX_WALK_ENTRIES:
+            return
+        dirnames[:] = [d for d in dirnames
+                       if not os.path.islink(os.path.join(dirpath, d))]
+
+
+def glob_match(pattern_parts: Sequence[str], path_parts: Sequence[str]) -> bool:
+    """glob-style match of path components: '*', '?', '[...]' within one
+    component, '**' across any number; a leading '.' must be matched literally."""
+    if not pattern_parts:
+        return not path_parts
+    pat, rest = pattern_parts[0], pattern_parts[1:]
+    if pat == "**":
+        if glob_match(rest, path_parts):
+            return True
+        return bool(path_parts) and not path_parts[0].startswith(".") \
+            and glob_match(pattern_parts, path_parts[1:])
+    if not path_parts:
+        return False
+    name = path_parts[0]
+    if name.startswith(".") and not pat.startswith("."):
+        return False
+    return fnmatch.fnmatchcase(name, pat) and glob_match(rest, path_parts[1:])
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -506,36 +556,33 @@ _GIT_CONFIG_RISKY = ("filter", "include", "gpg", "program", "command", "hookspat
                      "fsmonitor", "pager", "editor", "askpass", "sshcommand", "worktree",
                      "textconv", "external", "helper", "gitdir", "alias")
 # Prepended to every allowlisted git command (command-line -c beats repo config).
-_GIT_PREFIX = ["--no-pager", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+_GIT_PREFIX = ["--no-pager", "-c", "safe.bareRepository=explicit",
+               "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                "-c", "commit.gpgSign=false", "-c", "core.pager=cat"]
 
 
-def _git_repo_ok(sandbox: Sandbox, cwd: str) -> bool:
-    """The nearest .git between cwd and the root must be a real directory
-    whose config holds nothing that can run a program."""
-    d = cwd
-    while True:
-        git = os.path.join(d, ".git")
-        try:
-            st = os.lstat(git)
-        except OSError:
-            st = None
-        if st is not None:
-            if not stat.S_ISDIR(st.st_mode):
-                return False  # a .git file or symlink points somewhere else
-            config = os.path.join(git, "config")
-            try:
-                cst = os.lstat(config)
-            except OSError:
-                return True
-            if not stat.S_ISREG(cst.st_mode) or cst.st_size > 65536:
-                return False
-            with open(config, "r", encoding="utf-8", errors="ignore") as f:
-                text = f.read().lower()
-            return not any(word in text for word in _GIT_CONFIG_RISKY)
-        if d == str(sandbox.root) or not is_inside(sandbox, d):
-            return True
-        d = os.path.dirname(d)
+def _git_repo_ok(sandbox: Sandbox, *, must_exist: bool) -> bool:
+    """git always runs on ROOT/.git (GIT_DIR/GIT_WORK_TREE are set), never on
+    a repo git would discover itself; a model-written dir laid out like a bare
+    repo is therefore never used. ROOT/.git must be a real directory whose
+    config holds nothing that can run a program."""
+    git = os.path.join(str(sandbox.root), ".git")
+    try:
+        st = os.lstat(git)
+    except OSError:
+        return not must_exist
+    if not stat.S_ISDIR(st.st_mode):
+        return False  # a .git file or symlink points somewhere else
+    config = os.path.join(git, "config")
+    try:
+        cst = os.lstat(config)
+    except OSError:
+        return True
+    if not stat.S_ISREG(cst.st_mode) or cst.st_size > 65536:
+        return False
+    with open(config, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read().lower()
+    return not any(word in text for word in _GIT_CONFIG_RISKY)
 
 
 def _git_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> Optional[list]:
@@ -543,7 +590,7 @@ def _git_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> Optional[li
     if not args or args[0] not in _GIT_FLAGS:
         return None
     sub, rest = args[0], list(args[1:])
-    if not _git_repo_ok(sandbox, cwd):
+    if not _git_repo_ok(sandbox, must_exist=sub != "init"):
         return None
     flags = _GIT_FLAGS[sub]
     i, positional_only, has_message = 0, False, False
@@ -568,8 +615,8 @@ def _git_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> Optional[li
                 pass
             else:
                 return None
-        elif sub == "commit":
-            return None  # `git commit <paths>` is not needed
+        elif sub in ("commit", "init"):
+            return None  # `git commit <paths>` / `git init <dir>` are not needed
         elif a.startswith(":"):
             return None  # pathspec magic such as ':/' reaches outside the cwd
         elif sub == "diff" and not positional_only and _GIT_REV.fullmatch(a) \
@@ -797,9 +844,11 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
         tail = _git_args_ok(sandbox, cwd, args)
         git = _program(sandbox, "git")
         if tail is not None:
-            ceiling = os.path.dirname(str(sandbox.root))
-            return _Plan([git, *tail], env_extra=(("GIT_CEILING_DIRECTORIES", ceiling),
-                                                  ("GIT_TERMINAL_PROMPT", "0")))
+            root = str(sandbox.root)
+            return _Plan([git, *tail], env_extra=(
+                ("GIT_DIR", os.path.join(root, ".git")), ("GIT_WORK_TREE", root),
+                ("GIT_CEILING_DIRECTORIES", os.path.dirname(root)),
+                ("GIT_TERMINAL_PROMPT", "0")))
         return _Plan([git, *args], confirm="this git command is not on the allowlist")
     return _Plan([_program(sandbox, prog), *args], confirm=f"{prog!r} is not on the allowlist")
 
@@ -852,6 +901,10 @@ def run_argv(argv: Sequence[str], working_dir: Optional[str] = None) -> Outcome:
             return Outcome("declined", tuple(plan.argv),
                            reason=f"the person declined it ({plan.confirm})")
     try:
+        # The cwd was resolved earlier; refuse if it has since been swapped
+        # (e.g. for a symlink leading out of the root).
+        if os.path.realpath(cwd) != cwd or not is_inside(sandbox, cwd) or os.path.islink(cwd):
+            return Outcome("refused", tuple(plan.argv), reason="the working dir changed")
         result = subprocess.run(
             plan.argv, shell=False, cwd=cwd, env=_child_env(sandbox, plan.env_extra),
             stdin=subprocess.DEVNULL, capture_output=True, text=True,

@@ -74,7 +74,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   including `..`, absolute paths and symlinks (paths are opened one component
   at a time with `O_NOFOLLOW`, so a symlink swapped in later is refused too).
   `write_file` also refuses hard links and anything under `.git`, `.venv`,
-  `node_modules` or `.npmrc` (case-insensitively). With no root configured,
+  `node_modules`, `.npmrc`, `.envrc` or `.vscode` (case-insensitively).
+  `list_files` and `search_code` (a case-insensitive literal search) walk the
+  root without entering symlinked dirs and read files through the same checks. With no root configured,
   every tool refuses.
 - **No shell.** `run_command` splits the command with `shlex` and runs it with
   `shell=False`, in a working dir inside the root, with a scrubbed environment
@@ -83,8 +85,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
 - **Allowlist.** These run without asking, when every path argument stays in
   the root: `python3 -m pytest`, `python3 -m unittest`, `python3 -m py_compile`,
   `pytest`, `python3 -m venv .venv`, `node <script>` and `node --test`, `ls`,
-  `cat`, `git init|status|diff|add|commit -m` (with hooks, fsmonitor, external
-  diff and pager turned off), and `npm test` / `npm run <name>` when that
+  `cat`, `git init|status|diff|add|commit -m` (always on `ROOT/.git` via
+  `GIT_DIR`/`GIT_WORK_TREE`, with hooks, fsmonitor, external diff and pager
+  turned off), and `npm test` / `npm run <name>` when that
   package.json script is one plain test-runner command (jest, vitest, mocha,
   ava, tap or `node <script>`) with no pre/post hook. Options that write or
   read elsewhere (`pytest --basetemp`, `git -c`, `git diff --output`,

@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import subprocess
-import glob as _glob
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -54,7 +53,7 @@ def write_file(path: str, content: str) -> str:
 
 
 def list_files(pattern: str) -> str:
-    """Glob inside the sandbox root; matches that resolve outside it are dropped."""
+    """Glob inside the sandbox root. The walk never enters symlinked dirs."""
     try:
         sandbox = guard.current()
         parts = guard.relative_parts(sandbox, pattern)
@@ -65,9 +64,11 @@ def list_files(pattern: str) -> str:
     root = str(sandbox.root)
     absolute = os.path.isabs(os.path.expanduser(pattern))
     matches = []
-    for m in _glob.glob(os.path.join(*parts), root_dir=root, recursive=True):
-        if guard.is_inside(sandbox, os.path.realpath(os.path.join(root, m))):
-            matches.append(os.path.join(root, m) if absolute else m)
+    for rel, _is_dir in guard.walk(sandbox, root):
+        if guard.glob_match(parts, rel.split(os.sep)):
+            matches.append(os.path.join(root, rel) if absolute else rel)
+            if len(matches) >= 2000:
+                break
     return "\n".join(sorted(matches)) if matches else f"No files matching: {pattern}"
 
 
@@ -91,33 +92,43 @@ def run_command(command: str, working_dir: Optional[str] = None) -> str:
     return out
 
 
+_SEARCH_EXTENSIONS = (".py", ".ts", ".tsx", ".js", ".jsx", ".json", ".css", ".html", ".md")
+
+
 def search_code(pattern: str, directory: str = ".") -> str:
-    """grep inside the sandbox root (grep -r does not follow symlinks)."""
+    """Case-insensitive literal search of source files inside the sandbox
+    root. Files are read through the guard (no symlinks, no hard links), and
+    symlinked dirs are not entered."""
     try:
         sandbox = guard.current()
-        if not isinstance(pattern, str) or "\x00" in pattern:
-            raise guard.Refused("pattern must be a string without NUL bytes")
+        if not isinstance(pattern, str) or "\x00" in pattern or not pattern:
+            raise guard.Refused("pattern must be a non-empty string without NUL bytes")
         target = guard.resolve_dir(sandbox, directory)
     except guard.Refused as e:
         return f"Refused: {e}"
-    try:
-        result = subprocess.run(
-            ["grep", "-rn", "-i",
-             "--include=*.py", "--include=*.ts", "--include=*.tsx",
-             "--include=*.js", "--include=*.jsx", "--include=*.json",
-             "--include=*.css", "--include=*.html", "--include=*.md",
-             "-e", pattern, "--", target],
-            capture_output=True, text=True, timeout=10, cwd=str(sandbox.root),
-            stdin=subprocess.DEVNULL,
-        )
-        out = result.stdout
-        if not out.strip():
-            return f"No matches for '{pattern}' in {directory}"
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out
-    except Exception as e:
-        return f"Error: {e}"
+    needle = pattern.casefold()
+    root = str(sandbox.root)
+    lines, size = [], 0
+    for rel, is_dir in guard.walk(sandbox, target):
+        if is_dir or not rel.endswith(_SEARCH_EXTENSIONS):
+            continue
+        try:
+            text = guard.read_text(os.path.join(root, rel))
+        except (guard.Refused, OSError):
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if needle in line.casefold():
+                hit = f"{os.path.join(root, rel)}:{n}:{line}"
+                lines.append(hit)
+                size += len(hit) + 1
+        if size > MAX_OUTPUT:
+            break
+    if not lines:
+        return f"No matches for '{pattern}' in {directory}"
+    out = "\n".join(lines)
+    if len(out) > MAX_OUTPUT:
+        out = out[:MAX_OUTPUT] + "\n[truncated]"
+    return out
 
 
 def grep_repos(keywords: list, repos_dir: str = None) -> str:
@@ -403,7 +414,8 @@ RUN_COMMAND = make_tool(
                      "description": "Optional directory inside the project"}},
                         ["command"])
 
-SEARCH_CODE = make_tool("search_code", "Search for a pattern across source files.",
+SEARCH_CODE = make_tool("search_code",
+                        "Search source files in the project for a literal text (case-insensitive).",
                         {"pattern": {"type": "string"},
                          "directory": {"type": "string", "description": "Directory to search"}},
                         ["pattern"])

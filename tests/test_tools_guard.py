@@ -223,10 +223,11 @@ class ReadToolsTests(SandboxCase):
     def test_search_code_outside_is_refused_and_pattern_cannot_be_an_option(self) -> None:
         self.assertRefused(tools.search_code("x", str(self.outside)))
         self.assertRefused(tools.search_code("x", "../outside"))
-        self.run_mock.assert_not_called()
-        tools.search_code("-f/etc/passwd", ".")
-        argv = self.run_argv()
-        self.assertEqual(argv[-4:], ["-e", "-f/etc/passwd", "--", str(self.root)])
+        (self.root / "a.py").write_text("token = 1\nTOKEN_B = 2\n", encoding="utf-8")
+        self.assertEqual(tools.search_code("token"),
+                         f"{self.root}/a.py:1:token = 1\n{self.root}/a.py:2:TOKEN_B = 2")
+        self.assertTrue(tools.search_code("-f/etc/passwd").startswith("No matches"))
+        self.run_mock.assert_not_called()  # no grep subprocess at all
 
 
 # ── run_command ───────────────────────────────────────────────────────────────
@@ -460,6 +461,7 @@ class RunCommandAllowedTests(SandboxCase):
         (self.root / "tests").mkdir()
         (self.root / "app.js").write_text("", encoding="utf-8")
         (self.root / "main.py").write_text("", encoding="utf-8")
+        (self.root / ".git").mkdir()
         allowed = ["python3 -m unittest discover -s tests -v", "python -m unittest tests",
                    "python3 -m pytest -q tests/test_x.py::test_a", "pytest -x --tb=short", "pytest -v -k 'a or b'",
                    "python3 -m py_compile main.py", "node app.js --port 3000",
@@ -488,12 +490,16 @@ class RunCommandAllowedTests(SandboxCase):
                 self.assertEqual(argv[-1], "-q")  # forced options come before the model's
 
     def test_git_gets_hooks_disabled_and_a_ceiling(self) -> None:
+        (self.root / ".git").mkdir()
         tools.run_command("git commit -m x")
         argv, env = self.run_argv(), self.run_kwargs()["env"]
         self.assertEqual(argv[:2], ["/usr/bin/git", "--no-pager"])
         self.assertIn("core.hooksPath=/dev/null", argv)
         self.assertIn("core.fsmonitor=false", argv)
         self.assertEqual(env["GIT_CEILING_DIRECTORIES"], str(self.root.parent))
+        self.assertEqual(env["GIT_DIR"], str(self.root / ".git"))
+        self.assertEqual(env["GIT_WORK_TREE"], str(self.root))
+        self.assertIn("safe.bareRepository=explicit", argv)
 
     def test_npm_test_with_a_plain_runner_script_is_allowed(self) -> None:
         (self.root / "package.json").write_text(

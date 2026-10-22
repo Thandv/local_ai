@@ -9,6 +9,7 @@ model's report.
 import json
 import os
 import re
+import stat
 from pathlib import Path
 from typing import Optional
 
@@ -71,23 +72,33 @@ def _scan_python_tests(out: Path) -> tuple[bool, bool]:
                 needs_pytest = True
             if name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py")):
                 has = True
-                path = Path(dirpath) / name
-                if not needs_pytest and path.is_file() and not path.is_symlink():
-                    try:
-                        with open(path, encoding="utf-8", errors="ignore") as f:
-                            needs_pytest = bool(_PYTEST_IMPORT.search(f.read(200_000)))
-                    except OSError:
-                        pass
+                if not needs_pytest:
+                    text = _read_plain(Path(dirpath) / name)
+                    needs_pytest = bool(text and _PYTEST_IMPORT.search(text))
     return has, needs_pytest
 
 
+def _read_plain(path: Path, limit: int = 1_000_000) -> Optional[str]:
+    """Read a regular file without following a symlink; None for symlinks,
+    hard links (another name may be outside the build) and special files."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink > 1:
+            return None
+        return f.read(limit).decode("utf-8", errors="ignore")
+
+
 def _npm_test_script(out: Path) -> Optional[str]:
-    path = out / "package.json"
-    if path.is_symlink() or not path.is_file():
+    text = _read_plain(out / "package.json")
+    if text is None:
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(text)
+    except ValueError:
         return None
     scripts = data.get("scripts") if isinstance(data, dict) else None
     test = scripts.get("test") if isinstance(scripts, dict) else None
