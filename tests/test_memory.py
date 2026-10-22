@@ -1,10 +1,13 @@
 """Pins Project.compute_final_success (agents/shared/memory.py)."""
 
+import json
 import tempfile
 from pathlib import Path
 
 import support  # noqa: F401  (installs the guard before local_ai imports)
-from local_ai.agents.shared.memory import MIN_SOURCE_FILES, MIN_SOURCE_LOC, Project
+from local_ai.agents.shared.memory import (
+    MIN_SOURCE_FILES, MIN_SOURCE_LOC, Project, Verdict, read_build_log,
+)
 
 
 def _write_lines(path: Path, n: int) -> None:
@@ -95,3 +98,64 @@ class ComputeFinalSuccessTests(support.GuardedTestCase):
         self.assertEqual(
             self.project.compute_final_success(), (False, "test gate did not pass")
         )
+
+
+class VerdictTests(support.GuardedTestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self._tmp.name)
+        self.project = Project(instruction="invented widget app", output_dir=self.out)
+        self.project.success = True
+        (self.out / "PLAN.md").write_text("# plan\n", encoding="utf-8")
+        _write_lines(self.out / "app.py", 20)
+        _write_lines(self.out / "util.py", 20)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+        super().tearDown()
+
+    def test_all_gates_pass_is_success(self) -> None:
+        self.assertEqual(self.project.compute_verdict(), (Verdict.SUCCESS, ""))
+
+    def test_failed_gate_is_incomplete(self) -> None:
+        self.project.success = False
+        self.assertEqual(self.project.compute_verdict(),
+                         (Verdict.INCOMPLETE, "test gate did not pass"))
+
+    def test_fatal_stage_error_is_failed_even_when_gates_pass(self) -> None:
+        self.project.record_stage_error("coder", RuntimeError("invented"), fatal=True)
+        verdict, reason = self.project.compute_verdict()
+        self.assertEqual(verdict, Verdict.FAILED)
+        self.assertEqual(reason, "coder stage raised RuntimeError: invented")
+
+    def test_non_fatal_stage_error_leaves_the_gates_in_charge(self) -> None:
+        self.project.record_stage_error("reviewer", RuntimeError("invented"), fatal=False)
+        self.assertEqual(self.project.compute_verdict(), (Verdict.SUCCESS, ""))
+
+    def test_save_log_and_summary_emit_the_verdict(self) -> None:
+        self.project.record_stage_error("tester", ValueError("invented"), fatal=True)
+        self.project.save_log()
+        log = json.loads((self.out / "BUILD_LOG.json").read_text(encoding="utf-8"))
+        self.assertEqual(log["verdict"], "FAILED")
+        self.assertFalse(log["success"])
+        self.assertEqual(log["success_reason"], "tester stage raised ValueError: invented")
+        self.assertEqual(log["stage_errors"], [
+            {"stage": "tester", "error": "ValueError: invented", "fatal": True}])
+        self.assertIn("✗ FAILED", self.project.summary())
+        self.assertIn("tester stage raised ValueError: invented", self.project.summary())
+
+    def test_save_log_keeps_checkpoint_keys(self) -> None:
+        (self.out / "BUILD_LOG.json").write_text(
+            json.dumps({"completed_stages": ["designer", "coder"]}), encoding="utf-8")
+        self.project.save_log()
+        log = json.loads((self.out / "BUILD_LOG.json").read_text(encoding="utf-8"))
+        self.assertEqual(log["completed_stages"], ["designer", "coder"])
+        self.assertEqual(log["verdict"], "SUCCESS")
+        self.assertIn("✓ SUCCESS", self.project.summary())
+
+
+class ReadBuildLogTests(support.GuardedTestCase):
+    def test_non_object_log_reads_as_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "BUILD_LOG.json").write_text("[]", encoding="utf-8")
+            self.assertEqual(read_build_log(Path(tmp)), {})

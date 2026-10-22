@@ -5,27 +5,30 @@ Powered by Ollama or Claude API + live grep-based retrieval from
 cloned open-source repos. No vector DB required — just fast, precise search.
 
 Model: set LOCAL_AI_MODEL env var or use --model flag.
-  Local (default): qwen2.5-coder:32b via Ollama
-  Cloud  (best):   claude-opus-4-7 (set ANTHROPIC_API_KEY)
+  Local (default): qwen2.5-coder:7b via Ollama
+  Cloud:           a model name starting with "claude" (Claude API; needs the
+                   [claude] extra and ANTHROPIC_API_KEY)
 """
 
 import os
 import sys
-import json
 import subprocess
 import glob as glob_module
 import re
 from pathlib import Path
-from typing import Optional
 
-from local_ai.agents.shared.llm import chat as _llm_chat, set_model, get_model
+from local_ai.agents.shared.llm import (
+    LLMUnavailableError, run_tool_loop, set_model, get_model,
+)
+from local_ai.agents.shared.tools import (
+    HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 REPOS_DIR   = Path.home() / ".local-ai" / "repos"
 RAG_SNIPPETS = 5      # max snippets to inject per query
 SNIPPET_LINES = 40    # lines per snippet
-MAX_OUTPUT   = 8000
 
 SYSTEM_PROMPT = """You are an expert vibe-coder — you turn ideas into complete, working software.
 
@@ -104,204 +107,28 @@ def grep_repos(keywords: list[str], max_snippets: int = RAG_SNIPPETS) -> str:
 
     return "\n\n---\n\n".join(snippets)
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
+# ── Tools (the shared implementations in agents/shared/tools.py) ──────────────
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read the contents of a file.",
-            "parameters": {
-                "type": "object",
-                "properties": {"path": {"type": "string"}},
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "write_file",
-            "description": "Write content to a file, creating parent directories as needed.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files matching a glob pattern.",
-            "parameters": {
-                "type": "object",
-                "properties": {"pattern": {"type": "string"}},
-                "required": ["pattern"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "description": "Run a shell command and return its output.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string"},
-                    "working_dir": {"type": "string"}
-                },
-                "required": ["command"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_code",
-            "description": "Search for a text pattern across project files.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {"type": "string"},
-                    "directory": {"type": "string"}
-                },
-                "required": ["pattern"]
-            }
-        }
-    }
-]
-
-# ── Tool implementations ───────────────────────────────────────────────────────
-
-def read_file(path: str) -> str:
-    p = Path(path).expanduser()
-    if not p.exists():
-        return f"File not found: {path}"
-    try:
-        content = p.read_text(encoding="utf-8")
-        if len(content) > MAX_OUTPUT:
-            content = content[:MAX_OUTPUT] + f"\n[truncated — {len(content)} total chars]"
-        return content
-    except Exception as e:
-        return f"Error: {e}"
-
-def write_file(path: str, content: str) -> str:
-    p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(content, encoding="utf-8")
-    print(f"    wrote {path}")
-    return f"Written: {path}"
-
-def list_files(pattern: str) -> str:
-    matches = glob_module.glob(pattern, recursive=True)
-    return "\n".join(sorted(matches)) if matches else f"No files: {pattern}"
-
-def run_command(command: str, working_dir: Optional[str] = None) -> str:
-    cwd = Path(working_dir).expanduser() if working_dir else Path.cwd()
-    print(f"\n    $ {command}")
-    try:
-        result = subprocess.run(
-            command, shell=True, cwd=cwd,
-            capture_output=True, text=True, timeout=120
-        )
-        out = (result.stdout + result.stderr).strip()
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out or "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Timed out after 120s"
-    except Exception as e:
-        return f"Error: {e}"
-
-def search_code(pattern: str, directory: str = ".") -> str:
-    try:
-        result = subprocess.run(
-            ["grep", "-rn", "--include=*.py", "--include=*.js", "--include=*.ts",
-             "--include=*.jsx", "--include=*.tsx", "--include=*.json", "--include=*.css",
-             pattern, directory],
-            capture_output=True, text=True, timeout=10
-        )
-        out = result.stdout
-        if not out.strip():
-            return f"No matches for '{pattern}'"
-        if len(out) > MAX_OUTPUT:
-            out = out[:MAX_OUTPUT] + "\n[truncated]"
-        return out
-    except Exception as e:
-        return f"Error: {e}"
-
+TOOLS = [READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE]
 TOOL_HANDLERS = {
-    "read_file": read_file,
-    "write_file": write_file,
-    "list_files": list_files,
-    "run_command": run_command,
-    "search_code": search_code,
+    name: HANDLERS[name]
+    for name in ("read_file", "write_file", "list_files", "run_command", "search_code")
 }
-
-def extract_json_tool_call(content: str) -> Optional[list]:
-    """Extract one or more tool-call JSON objects embedded in the content field."""
-    if not content:
-        return None
-    calls = []
-    # Find all top-level {...} blocks in the text
-    depth = 0
-    start = None
-    for i, ch in enumerate(content):
-        if ch == "{":
-            if depth == 0:
-                start = i
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0 and start is not None:
-                fragment = content[start : i + 1]
-                try:
-                    obj = json.loads(fragment)
-                    if isinstance(obj, dict) and "name" in obj and "arguments" in obj:
-                        calls.append({"function": {"name": obj["name"], "arguments": obj["arguments"]}})
-                except json.JSONDecodeError:
-                    pass
-                start = None
-    return calls if calls else None
 
 # ── Agent loop ────────────────────────────────────────────────────────────────
 
+def _show_call(name: str, args: dict) -> None:
+    if name == "run_command":
+        print(f"\n    $ {args.get('command', '')}")
+    elif name == "write_file":
+        print(f"\n    write {args.get('path', '')}")
+    else:
+        print(f"\n  [{name}]", end="")
+
+
 def run_agent(messages: list) -> str:
-    while True:
-        msg = _llm_chat(messages, tools=TOOLS)
-        messages.append(msg)
-
-        tool_calls = msg.get("tool_calls") or extract_json_tool_call(msg.get("content", ""))
-
-        if not tool_calls:
-            return msg.get("content", "")
-
-        for call in tool_calls:
-            fn_name = call["function"]["name"]
-            raw_args = call["function"].get("arguments", {})
-            if isinstance(raw_args, str):
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    args = {}
-            else:
-                args = raw_args
-
-            handler = TOOL_HANDLERS.get(fn_name)
-            if handler:
-                print(f"\n  [{fn_name}]", end="")
-                tool_result = handler(**args)
-            else:
-                tool_result = f"Unknown tool: {fn_name}"
-
-            messages.append({"role": "tool", "content": tool_result})
+    """Run one REPL turn on the shared, bounded tool loop (history kept in messages)."""
+    return run_tool_loop(messages, TOOLS, TOOL_HANDLERS, on_tool_call=_show_call)
 
 # ── REPL ──────────────────────────────────────────────────────────────────────
 
@@ -311,7 +138,7 @@ def repos_status() -> str:
     repos = [d.name for d in REPOS_DIR.iterdir() if d.is_dir()]
     return f"{len(repos)} repos: {', '.join(repos)}" if repos else "No repos cloned yet — run: ai-index"
 
-def main():
+def _main() -> None:
     import argparse
     parser = argparse.ArgumentParser(prog="vibe", add_help=False)
     parser.add_argument("--model", "-m", default=None)
@@ -370,6 +197,13 @@ def main():
 
         reply = run_agent(messages)
         print(f"\n\nAI:\n{reply}\n")
+
+
+def main() -> None:
+    try:
+        _main()
+    except LLMUnavailableError as e:
+        sys.exit(str(e))  # prints the message to stderr, exit status 1
 
 
 if __name__ == "__main__":

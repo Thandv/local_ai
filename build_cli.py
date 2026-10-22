@@ -18,6 +18,7 @@ from pathlib import Path
 
 from local_ai import orchestrator
 from local_ai.agents.shared import llm as _llm
+from local_ai.agents.shared.memory import Project, Verdict
 
 # Canned preambles that guide the pipeline for common app shapes
 TEMPLATES = {
@@ -45,7 +46,7 @@ TEMPLATES = {
 }
 
 
-def main():
+def _main() -> None:
     parser = argparse.ArgumentParser(
         prog="build-app",
         description="Multi-agent AI app builder — describe an app, get working code.",
@@ -75,9 +76,9 @@ def main():
         metavar="MODEL",
         help=(
             "LLM backend and model. Examples: "
-            "qwen2.5-coder:32b (default Ollama), "
-            "claude-opus-4-7 (best, needs ANTHROPIC_API_KEY), "
-            "llama3.3:70b"
+            "qwen2.5-coder:7b (default, Ollama), "
+            "any other pulled Ollama tag such as llama3.3:70b, "
+            "or a name starting with 'claude' (Claude API, needs ANTHROPIC_API_KEY)"
         ),
     )
 
@@ -128,7 +129,7 @@ def main():
     # ── --resume mode ─────────────────────────────────────────────────────────
     if args.resume:
         instruction = " ".join(args.instruction) if args.instruction else ""
-        orchestrator.run(
+        project = orchestrator.run(
             instruction=instruction,
             resume_dir=Path(args.resume).expanduser(),
             skip_review=args.no_review,
@@ -139,6 +140,7 @@ def main():
             skip_designer=args.no_designer,
             interactive=args.interactive,
         )
+        _exit_if_failed(project)
         return
 
     # ── Normal build ──────────────────────────────────────────────────────────
@@ -155,7 +157,7 @@ def main():
 
     output_dir = Path(args.out).expanduser() if args.out else None
 
-    orchestrator.run(
+    project = orchestrator.run(
         instruction=instruction,
         output_dir=output_dir,
         skip_review=args.no_review,
@@ -166,6 +168,19 @@ def main():
         skip_designer=args.no_designer,
         interactive=args.interactive,
     )
+    _exit_if_failed(project)
+
+
+def _exit_if_failed(project: Project) -> None:
+    if project.verdict is Verdict.FAILED:
+        sys.exit(f"build-app: FAILED — {project.success_reason}")  # exit status 1
+
+
+def main() -> None:
+    try:
+        _main()
+    except _llm.LLMUnavailableError as e:
+        sys.exit(str(e))  # prints the message to stderr, exit status 1
 
 
 if __name__ == "__main__":

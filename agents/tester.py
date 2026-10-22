@@ -5,7 +5,7 @@ failures — up to MAX_ATTEMPTS times.
 """
 
 from pathlib import Path
-from .shared.llm import run_agent_loop
+from .shared.llm import run_agent_loop, stopped_at_round_limit
 from .shared.tools import READ_FILE, WRITE_FILE, LIST_FILES, RUN_COMMAND, SEARCH_CODE, HANDLERS
 from .shared.memory import Project
 
@@ -36,6 +36,21 @@ Your job: fix the failing tests by either:
 
 Read the failure output carefully, find the root cause, and apply a targeted fix.
 """
+
+
+# Substring heuristic over the agent's own report (to be replaced by the
+# real exit-code gate, LA-4). A loop that hit its round limit never reported.
+_FAILED_SIGNALS = ["FAILED", "ERROR", "error", "failed", "AssertionError",
+                   "ModuleNotFoundError", "ImportError", "exception"]
+_PASS_SIGNALS   = ["passed", "ok", "PASSED", "success", "✓", "✔"]
+
+
+def _looks_passing(test_output: str) -> bool:
+    if stopped_at_round_limit(test_output):
+        return False
+    has_failure = any(s in test_output for s in _FAILED_SIGNALS)
+    has_pass    = any(s in test_output for s in _PASS_SIGNALS)
+    return not has_failure or has_pass
 
 
 def run(project: Project) -> Project:
@@ -92,15 +107,7 @@ Files already written:
     project.files_written.extend(written)
     project.test_results = test_output
 
-    # Check if tests passed — look for obvious failure signals
-    failed_signals = ["FAILED", "ERROR", "error", "failed", "AssertionError",
-                      "ModuleNotFoundError", "ImportError", "exception"]
-    pass_signals   = ["passed", "ok", "PASSED", "success", "✓", "✔"]
-
-    has_failure = any(s in test_output for s in failed_signals)
-    has_pass    = any(s in test_output for s in pass_signals)
-
-    if has_failure and not has_pass:
+    if not _looks_passing(test_output):
         print(f"  [Tester] Tests failed — attempting fixes (max {MAX_ATTEMPTS}) …")
         for attempt in range(1, MAX_ATTEMPTS + 1):
             print(f"    Attempt {attempt}/{MAX_ATTEMPTS} …")
@@ -123,9 +130,7 @@ apply fixes, then re-run the tests. Report the final result.
             )
             project.test_results = test_output
 
-            still_failing = any(s in test_output for s in failed_signals)
-            now_passing   = any(s in test_output for s in pass_signals)
-            if not still_failing or now_passing:
+            if _looks_passing(test_output):
                 print("  [Tester] Tests passing!")
                 project.success = True
                 break
