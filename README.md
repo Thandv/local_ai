@@ -40,6 +40,11 @@ Claude backend is missing its package or key, the model call raises
 [Build verdict](#build-verdict)); `build-app`, `vibe` and `agent` exit with
 status 1 and print the reason to stderr.
 
+Debug logs: set `LOCAL_AI_DEBUG=1` to print `[local_ai debug]` lines to stderr
+for each model call (model, duration, sizes; never prompts), each command and
+git call (exit code, duration), each stage and checkpoint, and each error that
+is otherwise swallowed. Secrets are redacted. Unset or `0` changes nothing.
+
 ## Install
 
 Packaging is defined in `pyproject.toml` (setuptools, no runtime

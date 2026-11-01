@@ -21,10 +21,13 @@ from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
 from local_ai.agents.shared import guard
+from local_ai.agents.shared.debug import log as _root_log, setup_debug
 from local_ai.agents.shared.guard import shown
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE, wrap_untrusted,
 )
+
+log = _root_log.getChild("vibe")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -102,9 +105,11 @@ def grep_repos(keywords: list[str], max_snippets: int = RAG_SNIPPETS) -> str:
                     repo = Path(fpath).relative_to(REPOS_DIR).parts[0]
                     rel  = Path(fpath).relative_to(REPOS_DIR / repo)
                     snippets.append(f"# {repo} / {rel}\n{chunk}")
-                except Exception:
+                except Exception as e:
+                    log.debug("grep_repos skipped a file error=%s", type(e).__name__)
                     continue
-        except Exception:
+        except Exception as e:
+            log.debug("grep_repos grep failed error=%s", type(e).__name__)
             continue
 
     return "\n\n---\n\n".join(snippets)
@@ -206,6 +211,7 @@ def _main() -> None:
 
 
 def main() -> None:
+    setup_debug()
     try:
         _main()
     except LLMUnavailableError as e:

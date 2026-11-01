@@ -20,6 +20,7 @@ from datetime import datetime
 from local_ai.agents.shared import guard
 from local_ai.agents.shared.guard import shown
 from local_ai.agents.shared.llm import LLMUnavailableError
+from local_ai.agents.shared.debug import log as _root_log
 from local_ai.agents.shared.memory import BUILD_LOG, Project, read_build_log
 from local_ai.agents import (
     researcher, architect, coder, tester, reviewer,
@@ -27,6 +28,7 @@ from local_ai.agents import (
 )
 
 BUILDS_DIR = Path.home() / "builds"
+_dlog = _root_log.getChild("orchestrator")
 
 # A build cannot be judged without these; if one raises, the pipeline stops
 # with verdict FAILED. Every other stage is optional: it warns and continues.
@@ -91,6 +93,7 @@ def _save_checkpoint(project: Project, stage: str):
         "completed_stages": completed,
     })
     (project.output_dir / BUILD_LOG).write_text(json.dumps(log, indent=2), encoding="utf-8")
+    _dlog.debug("checkpoint saved stage=%s completed=%d", stage, len(completed))
 
 
 def run(
@@ -210,11 +213,15 @@ def _run_stages(project: Project, active_stages: list, step: int, total: int,
                 return project
 
         t0 = time.time()
+        _dlog.debug("stage start name=%s step=%d/%d", name, step, total)
         try:
             project = agent_fn(project)
             _save_checkpoint(project, name)
+            _dlog.debug("stage end name=%s status=ok ms=%d", name, int((time.time() - t0) * 1000))
         except Exception as e:
             fatal = name in REQUIRED_STAGES or isinstance(e, LLMUnavailableError)
+            _dlog.debug("stage end name=%s status=error error=%s fatal=%s ms=%d",
+                      name, type(e).__name__, fatal, int((time.time() - t0) * 1000))
             project.record_stage_error(name, e, fatal=fatal)
             traceback.print_exc()
             if fatal:

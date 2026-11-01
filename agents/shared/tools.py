@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +17,9 @@ from typing import Optional
 
 from . import guard
 from .guard import wrap_untrusted  # re-exported for the stages
+from .debug import log as _root_log
+
+log = _root_log.getChild("tools")
 
 MAX_OUTPUT = 10_000  # chars — truncate large outputs
 
@@ -79,7 +83,12 @@ def run_command(command: str, working_dir: Optional[str] = None) -> str:
         argv = guard.split_command(command)
     except guard.Refused as e:
         return f"Refused: {e}"
+    t0 = time.monotonic()
     outcome = guard.run_argv(argv, working_dir)
+    log.debug("run_command argv0=%s args=%d cwd=%s status=%s rc=%s ms=%d out_bytes=%d",
+              argv[0] if argv else "", max(len(argv) - 1, 0), working_dir or ".",
+              outcome.status, outcome.returncode, int((time.monotonic() - t0) * 1000),
+              len(outcome.output or ""))
     if not outcome.ran:
         return f"Refused: {outcome.reason}" if outcome.status != "timeout" \
             else f"Error: command {outcome.reason}"
@@ -114,7 +123,8 @@ def search_code(pattern: str, directory: str = ".") -> str:
             continue
         try:
             text = guard.read_text(os.path.join(root, rel))
-        except (guard.Refused, OSError):
+        except (guard.Refused, OSError) as e:
+            log.debug("search_code skipped a file error=%s", type(e).__name__)
             continue
         for n, line in enumerate(text.splitlines(), 1):
             if needle in line.casefold():
@@ -177,7 +187,8 @@ def grep_repos(keywords: list, repos_dir: str = None) -> str:
                     rel   = "/".join(Path(fpath).relative_to(root).parts[1:])
                     origin = "discovered" if root == REPOS_DISCOVERED else "curated"
                     snippets.append(f"### {repo} / {rel}  ({origin})\n```\n{chunk}\n```")
-            except Exception:
+            except Exception as e:
+                log.debug("grep_repos skipped error=%s", type(e).__name__)
                 continue
 
     return "\n\n".join(snippets) if snippets else "No relevant patterns found in reference repos."
@@ -308,12 +319,12 @@ def _peek_readme(repo_url: str) -> str:
                     import base64
                     try:
                         content = base64.b64decode(content).decode("utf-8", errors="ignore")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log.debug("peek_readme base64 decode failed error=%s", type(e).__name__)
                 return content[:MAX_OUTPUT] + (
                     f"\n[truncated — full README at {repo_url}]" if len(content) > MAX_OUTPUT else "")
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("peek_readme gh failed, using the API error=%s", type(e).__name__)
 
     # Fallback: raw README via GitHub API
     try:
