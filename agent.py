@@ -17,6 +17,7 @@ from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
 from local_ai.agents.shared import guard
+from local_ai.agents.shared.debug import setup_debug
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
 )
@@ -116,6 +117,7 @@ def _main() -> None:
 
 
 def main() -> None:
+    setup_debug()
     try:
         _main()
     except LLMUnavailableError as e:

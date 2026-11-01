@@ -18,6 +18,7 @@ from pathlib import Path
 
 from local_ai import orchestrator
 from local_ai.agents.shared import llm as _llm
+from local_ai.agents.shared.debug import setup_debug
 from local_ai.agents.shared.memory import Project, Verdict
 
 # Canned preambles that guide the pipeline for common app shapes
@@ -188,6 +189,7 @@ def _exit_if_failed(project: Project) -> None:
 
 
 def main() -> None:
+    setup_debug()
     try:
         _main()
     except _llm.LLMUnavailableError as e:

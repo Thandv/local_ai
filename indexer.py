@@ -8,27 +8,34 @@ No embeddings or vector DB needed — just fast grep-based search.
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+from local_ai.agents.shared.debug import log as _root_log, setup_debug
+
+log = _root_log.getChild("indexer")
 
 REPOS_JSON = Path(__file__).parent / "repos.json"  # bundled with package
 CLONE_DIR  = Path.home() / ".local-ai" / "repos"
 
 
+def _git(argv: list) -> subprocess.CompletedProcess:
+    t0 = time.monotonic()
+    r = subprocess.run(argv, capture_output=True)
+    log.debug("git %s args=%d rc=%d ms=%d", argv[1] if argv[1] != "-C" else argv[3],
+              len(argv) - 1, r.returncode, int((time.monotonic() - t0) * 1000))
+    return r
+
+
 def clone_or_update(url: str, dest: Path) -> bool:
     if (dest / ".git").exists():
         print(f"  updating {dest.name} …", end=" ", flush=True)
-        r = subprocess.run(
-            ["git", "-C", str(dest), "pull", "--ff-only", "--quiet"],
-            capture_output=True,
-        )
+        r = _git(["git", "-C", str(dest), "pull", "--ff-only", "--quiet"])
         print("done" if r.returncode == 0 else "skipped (local changes)")
     else:
         print(f"  cloning  {url} …", end=" ", flush=True)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
-            ["git", "clone", "--depth=1", "--quiet", url, str(dest)],
-            capture_output=True,
-        )
+        r = _git(["git", "clone", "--depth=1", "--quiet", url, str(dest)])
         if r.returncode != 0:
             print(f"FAILED\n  {r.stderr.decode()[:200]}")
             return False
@@ -61,6 +68,7 @@ def build_index(repos_json: Path = REPOS_JSON, limit: int = 0):
 
 
 def main() -> None:
+    setup_debug()
     limit = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     build_index(limit=limit)
 

@@ -18,6 +18,10 @@ import urllib.request
 import urllib.error
 from typing import Any, Callable, Mapping, Optional
 
+from .debug import log as _root_log
+
+log = _root_log.getChild("llm")
+
 ToolHandlers = Mapping[str, Callable[..., str]]
 
 
@@ -59,11 +63,15 @@ def _is_claude(model: str) -> bool:
 
 def _list_ollama_models() -> list[str]:
     """Return the list of model tags pulled in the local Ollama. Empty on error."""
+    t0 = time.monotonic()
     try:
         with urllib.request.urlopen(OLLAMA_TAGS, timeout=5) as resp:
             data = json.loads(resp.read())
-        return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
-    except Exception:
+        names = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+        log.debug("ollama tags end status=ok models=%d ms=%d", len(names), _ms(t0))
+        return names
+    except Exception as e:
+        log.debug("ollama tags end status=error error=%s: %s ms=%d", type(e).__name__, e, _ms(t0))
         return []
 
 
@@ -102,8 +110,13 @@ def _resolve_active_model() -> None:
     print(f"\n[LLM] Requested model {_ACTIVE_MODEL!r} is not pulled in Ollama. "
           f"Falling back to {chosen!r}. "
           f"To pull the requested model: `ollama pull {_ACTIVE_MODEL}`.\n")
+    log.debug("model fallback requested=%s chosen=%s", _ACTIVE_MODEL, chosen)
     _ACTIVE_MODEL   = chosen
     _MODEL_RESOLVED = True
+
+
+def _ms(t0: float) -> int:
+    return int((time.monotonic() - t0) * 1000)
 
 
 # ── Ollama backend ─────────────────────────────────────────────────────────────
@@ -124,6 +137,9 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
     tool_calls = None
     retries    = 3
     for attempt in range(1, retries + 1):
+        t0 = time.monotonic()
+        log.debug("ollama chat start model=%s messages=%d tools=%d attempt=%d",
+                  model, len(messages), len(tools or []), attempt)
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 for raw in resp:
@@ -132,7 +148,8 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
                         continue
                     try:
                         chunk = json.loads(line)
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        log.debug("ollama chat skipped a non-JSON line error=%s", e)
                         continue
                     msg_chunk = chunk.get("message", {})
                     delta = msg_chunk.get("content") or ""
@@ -145,8 +162,12 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
                         if content:
                             print()
                         break
+            log.debug("ollama chat end status=ok model=%s ms=%d chars=%d tool_calls=%d",
+                      model, _ms(t0), len(content), len(tool_calls or []))
             break  # success
         except urllib.error.URLError as e:
+            log.debug("ollama chat end status=error model=%s error=%s ms=%d",
+                      model, type(e).__name__, _ms(t0))
             if attempt == retries:
                 raise LLMUnavailableError(
                     f"[LLM] Cannot reach Ollama after {retries} attempts — "
@@ -155,6 +176,10 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
             wait = 2 ** attempt
             print(f"\n[LLM] Connection error (attempt {attempt}/{retries}), retrying in {wait}s …")
             time.sleep(wait)
+        except Exception as e:
+            log.debug("ollama chat end status=error model=%s error=%s ms=%d",
+                      model, type(e).__name__, _ms(t0))
+            raise
 
     return {"role": "assistant", "content": content, "tool_calls": tool_calls}
 
@@ -250,11 +275,21 @@ def _claude_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
     accumulated = ""
     tool_calls: list = []
 
-    with client.messages.stream(**kwargs) as stream:
-        for text in stream.text_stream:
-            print(text, end="", flush=True)
-            accumulated += text
-        final = stream.get_final_message()
+    t0 = time.monotonic()
+    log.debug("claude chat start model=%s messages=%d tools=%d",
+              model, len(claude_msgs), len(claude_tools))
+    try:
+        with client.messages.stream(**kwargs) as stream:
+            for text in stream.text_stream:
+                print(text, end="", flush=True)
+                accumulated += text
+            final = stream.get_final_message()
+    except Exception as e:
+        log.debug("claude chat end status=error model=%s error=%s ms=%d",
+                  model, type(e).__name__, _ms(t0))
+        raise
+    log.debug("claude chat end status=ok model=%s ms=%d chars=%d stop=%s",
+              model, _ms(t0), len(accumulated), getattr(final, "stop_reason", None))
 
     if accumulated:
         print()
@@ -358,7 +393,8 @@ def _call_signature(name: str, args: Any) -> str:
     """Stable string signature of a tool call, used by the no-progress detector."""
     try:
         return f"{name}:{json.dumps(args, sort_keys=True, default=str)[:400]}"
-    except Exception:
+    except Exception as e:
+        log.debug("call signature not JSON tool=%s error=%s", name, type(e).__name__)
         return f"{name}:{str(args)[:400]}"
 
 
