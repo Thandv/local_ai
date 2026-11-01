@@ -5,7 +5,9 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
+import types
 import urllib.error
 from unittest import mock
 
@@ -75,6 +77,35 @@ class DebugLogTests(support.GuardedTestCase):
         err = self._run("1", fail)
         self.assertEqual(err.count("ollama chat end status=error model=m error=URLError"), 3)
         self.assertNotIn(SENTINEL, err)
+
+    def test_claude_call_logs_start_and_end_without_prompt_or_key(self):
+        class _Stream:
+            text_stream = ["hi"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return None
+
+            def get_final_message(self):
+                return types.SimpleNamespace(content=[], stop_reason="end_turn")
+
+        fake = types.ModuleType("anthropic")
+        fake.Anthropic = lambda **kw: types.SimpleNamespace(  # type: ignore[attr-defined]
+            messages=types.SimpleNamespace(stream=lambda **kw: _Stream()))
+        key = "sk-ant-invented-key-0000"
+        msgs = [{"role": "system", "content": SENTINEL}] + MESSAGES
+
+        def call():
+            with mock.patch.dict(sys.modules, {"anthropic": fake}), \
+                    mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": key}):
+                llm._claude_chat(msgs, [], "claude-x", timeout=5)
+        err = self._run("1", call)
+        self.assertIn("claude chat start model=claude-x messages=1", err)
+        self.assertIn("claude chat end status=ok model=claude-x", err)
+        self.assertNotIn(SENTINEL, err)
+        self.assertNotIn(key, err)
 
     def test_run_command_logs_status_not_output(self):
         outcome = guard.Outcome("ran", ("ls", "-la"), returncode=0, output=SENTINEL)
