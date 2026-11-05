@@ -28,6 +28,7 @@ program starts and where; it does not contain what that program then does.
 
 from __future__ import annotations
 
+import configparser
 import contextlib
 import contextvars
 import fnmatch
@@ -462,8 +463,66 @@ def _pytest_pinned(sandbox: Sandbox, report: Optional[str] = None) -> list:
               "-p", "no:cacheprovider"]
     if report is not None:
         pinned += ["-c", os.devnull, f"--rootdir={sandbox.root}", "-o", "addopts=",
-                   f"--junitxml={report}"]
+                   *_pytest_build_paths(sandbox), f"--junitxml={report}"]
     return pinned
+
+
+# The files pytest takes its config from in the root, in its own order, and
+# the section each must have to count (None: pyproject.toml's tool tables).
+_PYTEST_CONFIGS = (("pytest.ini", "pytest"), (".pytest.ini", "pytest"),
+                   ("pyproject.toml", None), ("tox.ini", "pytest"), ("setup.cfg", "tool:pytest"))
+
+
+def _pytest_config(sandbox: Sandbox) -> dict:
+    """The build root's own pytest settings, from the file pytest would use."""
+    for name, section in _PYTEST_CONFIGS:
+        try:
+            fd = _open_file(sandbox, name, write=False)
+            with os.fdopen(fd, "rb") as f:
+                text = f.read(MAX_READ_BYTES).decode("utf-8", errors="ignore")
+        except (Refused, OSError):
+            continue
+        if section is None:
+            try:
+                import tomllib
+                tool = tomllib.loads(text).get("tool", {})
+            except (ImportError, ValueError):
+                continue
+            table = tool.get("pytest") if isinstance(tool, dict) else None
+            table = table.get("ini_options", table) if isinstance(table, dict) else None
+            if isinstance(table, dict):
+                return table
+            continue
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        try:
+            parser.read_string(text)
+        except configparser.Error:
+            return {}
+        if parser.has_section(section):
+            return dict(parser.items(section))
+        if name.endswith("pytest.ini"):
+            return {}  # a pytest.ini is pytest's config file even with no section
+    return {}
+
+
+def _pytest_build_paths(sandbox: Sandbox) -> list:
+    """`-o pythonpath=` / `-o testpaths=` from the build's own pytest config,
+    the only two settings the test gate keeps (so a src layout still imports),
+    each entry a plain path that resolves inside the root."""
+    out = []
+    config = _pytest_config(sandbox)
+    for key in ("pythonpath", "testpaths"):
+        value = config.get(key)
+        try:
+            entries = shlex.split(value) if isinstance(value, str) else list(value or [])
+        except (ValueError, TypeError):
+            continue
+        root = str(sandbox.root)
+        paths = [_real_from(root, e) for e in entries if isinstance(e, str) and e
+                 and not any(c in e for c in "*?[") and _path_ok(sandbox, root, e)]
+        if paths:
+            out += ["-o", f"{key}={shlex.join(paths)}"]
+    return out
 
 
 def _pytest_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
@@ -718,6 +777,14 @@ def _npm_script_safe(sandbox: Sandbox, cwd: str, name: str) -> tuple[bool, str]:
     else:
         ok = False
     return (True, "") if ok else (False, f"script {name!r} runs {body!r}")
+
+
+def npm_script_plain(root, name: str = "test") -> bool:
+    """True when package.json's `name` script in `root` is one plain
+    test-runner command with no pre/post hook: only then is what npm prints
+    the runner's own output (the test gate's check, any yes_unsafe aside)."""
+    sandbox = make_sandbox(root)
+    return _npm_script_safe(sandbox, str(sandbox.root), name)[0]
 
 
 # pip never reads a model-written file and never sees an ambiguous argument.

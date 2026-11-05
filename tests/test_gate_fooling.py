@@ -169,6 +169,47 @@ class GateFoolingTests(RealPytestGate):
         self.assertNotPass(self.gate())
 
 
+class BuildConfigPathsTests(RealPytestGate):
+    """The gate honours only `pythonpath` and `testpaths` from the build's
+    own pytest config (inside the root), so a src layout still imports;
+    addopts, plugins and filters stay ignored."""
+
+    SRC = {"src/app.py": "def add(a, b):\n    return a + b\n",
+           "tests/test_app.py": "from app import add\n\ndef test_add():\n    assert add(1, 2) == 3\n"}
+
+    def write_all(self, files: dict) -> None:
+        for rel, text in files.items():
+            self.write(rel, text)
+
+    def test_src_layout_with_pythonpath_in_pytest_ini_passes(self) -> None:
+        self.write_all({**self.SRC, "pytest.ini": "[pytest]\npythonpath = src\ntestpaths = tests\n"})
+        self.assertEqual(self.gate()["status"], "pass")
+
+    def test_src_layout_with_pythonpath_in_pyproject_passes(self) -> None:
+        self.write_all({**self.SRC,
+                        "pyproject.toml": '[tool.pytest.ini_options]\npythonpath = ["src"]\n'})
+        self.assertEqual(self.gate()["status"], "pass")
+
+    def test_testpaths_keeps_stray_scripts_out_of_collection(self) -> None:
+        self.write_all({"setup.cfg": "[tool:pytest]\ntestpaths = tests\n",
+                        "tests/test_app.py": "def test_ok():\n    pass\n",
+                        "scripts/test_manual.py": "import does_not_exist\n"})
+        self.assertEqual(self.gate()["status"], "pass")
+
+    def test_addopts_next_to_pythonpath_is_still_ignored(self) -> None:
+        self.write_all({**self.SRC, "pytest.ini": "[pytest]\npythonpath = src\naddopts = -s -k nothing\n",
+                        "tests/test_bad.py": f"print({FAKE_SUMMARY!r})\n\ndef test_bad():\n    assert False\n"})
+        self.assertEqual(self.gate()["status"], "fail")
+
+    def test_paths_outside_the_build_are_not_honoured(self) -> None:
+        self.write_all({"pytest.ini": "[pytest]\ntestpaths = .. /etc tests/*\npythonpath = ../.. /etc\n",
+                        "tests/test_app.py": "def test_bad():\n    assert False\n"})
+        gate = self.gate()
+        self.assertEqual(gate["status"], "fail")
+        argv = guard._pytest_build_paths(guard.make_sandbox(self.out))
+        self.assertEqual(argv, [])
+
+
 class NpmGateTests(support.GuardedTestCase):
     """npm test output without a test count is never "pass"."""
 
@@ -200,3 +241,28 @@ class NpmGateTests(support.GuardedTestCase):
         # The script is the runner: everything it prints is the model's own.
         gate = self.gate("node t.js", 0, "Tests:       3 passed, 3 total\n3 passing\n# pass 3")
         self.assertNotEqual(gate["status"], "pass", gate)
+
+    def test_a_script_that_is_not_one_plain_runner_is_never_a_pass(self) -> None:
+        # With --yes-unsafe (or a confirmed prompt) npm runs any script; what it
+        # prints is the model's own, not a runner's count.
+        for script, output in (("echo Tests: 3 passed, 3 total", "Tests: 3 passed, 3 total"),
+                               ("echo 3 passing", "3 passing"),
+                               ("sh t.sh", "Tests:       3 passed, 3 total"),
+                               ("node --test; echo '# pass 5'", "# pass 5")):
+            with self.subTest(script=script):
+                gate = self.gate(script, 0, output)
+                self.assertEqual(gate["status"], "unverified", gate)
+
+    def test_a_pre_or_post_hook_makes_the_count_unverified(self) -> None:
+        for hook in ("pretest", "posttest"):
+            with self.subTest(hook=hook):
+                (self.out / "package.json").write_text(json.dumps(
+                    {"scripts": {"test": "node --test", hook: "echo '# pass 5'"}}), encoding="utf-8")
+                self.run_argv.return_value = Outcome(
+                    "ran", ("npm", "test"), returncode=0, output="\u2139 pass 0\n# pass 5")
+                gate = tester.run_test_gate(Project(instruction="x", output_dir=self.out))
+                self.assertEqual(gate["status"], "unverified", gate)
+
+    def test_control_a_plain_runner_with_a_count_passes(self) -> None:
+        gate = self.gate("node --test", 0, "\u2139 tests 1\n\u2139 pass 1\n\u2139 fail 0")
+        self.assertEqual(gate["status"], "pass", gate)

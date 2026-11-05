@@ -194,7 +194,10 @@ def _judge_pytest(report: Optional[dict]) -> tuple[str, str]:
     return "pass", f"{passed} passed"
 
 
-def _judge_npm(script: str, output: str) -> tuple[str, str]:
+def _judge_npm(script: str, output: str, plain: bool = True) -> tuple[str, str]:
+    if not plain:
+        return "unverified", ("npm test is not one plain test-runner command (shell syntax, "
+                              "a pre/post hook or another program): its output is its own")
     try:
         words = shlex.split(script)
     except ValueError:
@@ -213,7 +216,7 @@ def _judge_npm(script: str, output: str) -> tuple[str, str]:
 
 
 def judge(runner: str, returncode: int, output: str, report: Optional[dict] = None,
-          script: str = "") -> tuple[str, str]:
+          script: str = "", plain: bool = True) -> tuple[str, str]:
     """(status, reason) for a test command that ran.
 
     pytest: exit 0 and, in the JUnit report the gate asked for (`report`,
@@ -221,8 +224,10 @@ def judge(runner: str, returncode: int, output: str, report: Optional[dict] = No
     console output is not read, so a printed summary line counts for nothing.
     unittest: exit 0 with 'Ran N tests', N >= 1, not all skipped.
     npm (`script` is package.json's test script): exit 0 and a test runner's
-    own count of N >= 1 passed; no count, or a plain `node <file>` script,
-    is "unverified" (the verdict UNVERIFIED), never "pass"."""
+    own count of N >= 1 passed; no count, a plain `node <file>` script, or
+    a script that is not one plain runner command (`plain` False: shell
+    syntax, a pre/post hook, another program) is "unverified" (the verdict
+    UNVERIFIED), never "pass"."""
     if runner == "unittest":
         ran = _UNITTEST_RAN.findall(output)
         count = int(ran[-1]) if ran else 0
@@ -243,7 +248,7 @@ def judge(runner: str, returncode: int, output: str, report: Optional[dict] = No
     if _NO_TESTS.search(output):
         return "fail", "the test command ran no tests"
     if runner == "npm":
-        return _judge_npm(script, output)
+        return _judge_npm(script, output, plain)
     return "fail", f"no way to verify {runner}'s result"
 
 
@@ -265,10 +270,11 @@ def run_test_gate(project: Project) -> dict:
             report = junit_counts(path)
         else:
             outcome = guard.run_argv(found["argv"])
+    plain = runner != "npm" or guard.npm_script_plain(project.output_dir)
     tail = outcome.output[-OUTPUT_TAIL:]
     if outcome.ran:
         status, reason = judge(runner, outcome.returncode, outcome.output, report,
-                               found.get("script", ""))
+                               found.get("script", ""), plain)
     elif outcome.status == "timeout":
         status, reason = "fail", outcome.reason
     else:  # refused, no TTY, declined, could not start

@@ -127,8 +127,8 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   `node -e`, `python -c`, ...) are not on it. Every allowlisted pytest run also gets
   `--basetemp=ROOT/.pytest_tmp -p no:cacheprovider`, so `addopts` in a
   model-written `pytest.ini` cannot point those outside the root (the test
-  gate's own run ignores model-written pytest config entirely; see
-  [Build verdict](#build-verdict)).
+  gate's own run ignores model-written pytest config except `pythonpath`
+  and `testpaths`; see [Build verdict](#build-verdict)).
 - **Confirmation.** Anything else is shown to you with a `y/N` prompt when
   stdin is a TTY, and refused when it is not. `--yes-unsafe` on the
   `build-app`, `vibe` or `agent` command line skips that prompt; the model
@@ -218,16 +218,21 @@ pass/fail/skipped/unverified, `runner`, `returncode`, `reason`, `output_tail`) i
   (`--junitxml=` into a fresh temp dir outside the build), never from the
   console output: it passes only on exit 0 with at least one passed test and
   no failure or error in that report. A missing or unreadable report fails.
-  The gate's pytest run also ignores every model-written pytest config
+  The gate's pytest run also ignores model-written pytest config
   (`-c /dev/null --rootdir=<build> -o addopts=`), so `pytest.ini`,
   `pyproject.toml`, `setup.cfg` and `tox.ini` cannot add `-s`, `--co`, `-k`
-  or `-m` to it. unittest passes only on exit 0 with `Ran N tests`, N >= 1,
+  or `-m` to it. Only their `pythonpath` and `testpaths` are kept (as `-o`
+  overrides, each entry a path inside the build), so a `src/` layout still
+  imports. unittest passes only on exit 0 with `Ran N tests`, N >= 1,
   not all of them skipped.
 - `npm test` passes only on exit 0 with the test runner's own count of
   N >= 1 passed tests (the last jest, vitest, mocha, ava or `node --test`
-  summary in the output) and no reported failure. Exit 0 with no count, or a
-  `test` script that is a plain `node <file>` (whose output is its own), is
-  `unverified`, which gives `UNVERIFIED`, never `SUCCESS`.
+  summary in the output) and no reported failure. Exit 0 with no count, a
+  `test` script that is a plain `node <file>` (whose output is its own), or
+  one that is not a single plain test-runner command (shell syntax, a
+  pre/post hook, another program; npm runs these only after a confirmation
+  or with `--yes-unsafe`) is `unverified`, which gives `UNVERIFIED`, never
+  `SUCCESS`.
 - Limit: `conftest.py`, test modules and pytest plugins are model code that
   runs inside pytest. They can rewrite pytest's own results (for example a
   hook that marks failures as passed); the gate stops config- and
