@@ -10,6 +10,7 @@ Select via LOCAL_AI_MODEL env var or set_model() / --model flag:
 Both backends stream tokens to stdout and return the same message dict.
 """
 
+import http.client
 import inspect
 import json
 import os
@@ -42,6 +43,11 @@ OLLAMA_TAGS   = "http://localhost:11434/api/tags"
 # The installer pulls qwen2.5-coder:7b by default (works on 16 GB Macs).
 # We match that here so a fresh install "just works" without --model.
 DEFAULT_MODEL = os.environ.get("LOCAL_AI_MODEL", "qwen2.5-coder:7b")
+
+# Wall-clock limit for one Ollama chat() call, retries included. The per-call
+# `timeout` bounds each socket read; this bounds a stream that keeps
+# trickling tokens (or a run of slow retries) forever.
+CALL_DEADLINE_S = 900
 _ACTIVE_MODEL = DEFAULT_MODEL
 _MODEL_RESOLVED = False  # have we verified the active model exists in Ollama?
 
@@ -121,8 +127,16 @@ def _ms(t0: float) -> int:
 
 # ── Ollama backend ─────────────────────────────────────────────────────────────
 
-def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
-    """Streaming Ollama call. Prints tokens live; returns assembled message dict."""
+class _StreamBroken(Exception):
+    """The Ollama stream ended or failed before its "done" chunk."""
+
+
+def _ollama_chat(messages: list, tools: list, model: str, timeout: float) -> dict:
+    """Streaming Ollama call. Prints tokens live; returns assembled message dict.
+
+    A connection error, an HTTP error, a read timeout or a stream that ends
+    before Ollama's "done" chunk is retried (3 attempts, 2 s and 4 s apart),
+    then raised as LLMUnavailableError; so is passing CALL_DEADLINE_S."""
     payload = json.dumps({
         "model":    model,
         "messages": messages,
@@ -133,16 +147,31 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
         OLLAMA_URL, data=payload,
         headers={"Content-Type": "application/json"}, method="POST",
     )
-    content    = ""
-    tool_calls = None
-    retries    = 3
+    retries  = 3
+    deadline = time.monotonic() + CALL_DEADLINE_S
+
+    def past_deadline() -> LLMUnavailableError:
+        return LLMUnavailableError(
+            f"[LLM] The Ollama call passed its {CALL_DEADLINE_S}s deadline "
+            f"(model {model}); the reply was dropped.")
+
     for attempt in range(1, retries + 1):
+        content    = ""  # a retry starts the reply afresh
+        tool_calls = None
         t0 = time.monotonic()
         log.debug("ollama chat start model=%s messages=%d tools=%d attempt=%d",
                   model, len(messages), len(tools or []), attempt)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise past_deadline()
+            done = False
+            with urllib.request.urlopen(req, timeout=min(timeout, remaining)) as resp:
                 for raw in resp:
+                    if time.monotonic() > deadline:
+                        if content:
+                            print()
+                        raise past_deadline()
                     line = raw.decode("utf-8").strip()
                     if not line:
                         continue
@@ -161,17 +190,30 @@ def _ollama_chat(messages: list, tools: list, model: str, timeout: int) -> dict:
                     if chunk.get("done"):
                         if content:
                             print()
+                        done = True
                         break
+            if not done:
+                raise _StreamBroken("the stream ended before Ollama's done chunk")
             log.debug("ollama chat end status=ok model=%s ms=%d chars=%d tool_calls=%d",
                       model, _ms(t0), len(content), len(tool_calls or []))
             break  # success
-        except urllib.error.URLError as e:
+        except LLMUnavailableError:
+            log.debug("ollama chat end status=deadline model=%s ms=%d", model, _ms(t0))
+            raise
+        except (OSError, http.client.HTTPException, _StreamBroken) as e:
+            # URLError/HTTPError, TimeoutError and connection resets are OSErrors;
+            # IncompleteRead and RemoteDisconnected are HTTPExceptions.
+            if isinstance(e, urllib.error.HTTPError):
+                e.close()
             log.debug("ollama chat end status=error model=%s error=%s ms=%d",
                       model, type(e).__name__, _ms(t0))
+            if content:
+                print()
             if attempt == retries:
                 raise LLMUnavailableError(
                     f"[LLM] Cannot reach Ollama after {retries} attempts — "
-                    f"is it running? (`brew services start ollama`)\n{e}"
+                    f"is it running? (`brew services start ollama`)\n"
+                    f"{type(e).__name__}: {e}"
                 ) from e
             wait = 2 ** attempt
             print(f"\n[LLM] Connection error (attempt {attempt}/{retries}), retrying in {wait}s …")

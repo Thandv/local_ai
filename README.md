@@ -36,9 +36,16 @@ model name starting with `claude` selects the Claude API, which needs the
 
 If Ollama cannot be reached after 3 attempts (2 s and 4 s apart), or the
 Claude backend is missing its package or key, the model call raises
-`LLMUnavailableError`. `build-app` then stops with the verdict `FAILED` (see
-[Build verdict](#build-verdict)); `build-app`, `vibe` and `agent` exit with
-status 1 and print the reason to stderr.
+`LLMUnavailableError`. So does an Ollama stream that fails part-way (a read
+timeout, a dropped connection, an HTTP error, or a stream that ends before
+Ollama's `done`), after the same 3 attempts, and any Ollama call that runs
+past its wall-clock deadline (`CALL_DEADLINE_S`, 900 s, retries included;
+the `timeout` of 180 s applies to each socket read). `build-app` then stops
+with the verdict `FAILED` (see [Build verdict](#build-verdict)) and exits
+with status 1, printing the reason to stderr. In `vibe` and `agent` a turn
+that fails for any reason (this error included) prints the reason to
+stderr, is dropped from the conversation, and the session goes on to the
+next prompt.
 
 Debug logs: set `LOCAL_AI_DEBUG=1` to print `[local_ai debug]` lines to stderr
 for each model call (model, duration, sizes; never prompts), each command and

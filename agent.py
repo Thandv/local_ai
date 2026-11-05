@@ -17,10 +17,12 @@ from local_ai.agents.shared.llm import (
     LLMUnavailableError, run_tool_loop, set_model, get_model,
 )
 from local_ai.agents.shared import guard
-from local_ai.agents.shared.debug import setup_debug
+from local_ai.agents.shared.debug import log as _root_log, setup_debug
 from local_ai.agents.shared.tools import (
     HANDLERS, LIST_FILES, READ_FILE, RUN_COMMAND, SEARCH_CODE, WRITE_FILE,
 )
+
+log = _root_log.getChild("agent")
 
 SYSTEM_PROMPT = """You are an expert AI coding assistant running locally on the user's machine.
 You help write, debug, refactor, and build complete software applications.
@@ -108,10 +110,19 @@ def _main() -> None:
             print("Conversation cleared.\n")
             continue
 
+        turn_start = len(messages)
         messages.append({"role": "user", "content": user_input})
         print("\nAI: ", end="", flush=True)
 
-        reply = run_agent(messages)
+        try:
+            reply = run_agent(messages)
+        except Exception as e:  # one bad turn must not end the session
+            del messages[turn_start:]  # drop the failed turn from the history
+            log.debug("turn failed error=%s", type(e).__name__)
+            why = str(e) if isinstance(e, LLMUnavailableError) else f"{type(e).__name__}: {e}"
+            print(f"\n[error] This turn failed and was dropped: {why}\n"
+                  "  The session continues; try again or type 'exit'.\n", file=sys.stderr)
+            continue
         print(reply)
         print()
 

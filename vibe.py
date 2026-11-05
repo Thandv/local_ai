@@ -190,6 +190,7 @@ def _main() -> None:
             print("Conversation reset.\n")
             continue
 
+        turn_start = len(messages)
         # Grep-based RAG: find relevant code from cloned repos
         keywords = extract_keywords(user_input)
         if keywords:
@@ -206,7 +207,15 @@ def _main() -> None:
         messages.append({"role": "user", "content": user_input})
         print("\nThinking", end="", flush=True)
 
-        reply = run_agent(messages)
+        try:
+            reply = run_agent(messages)
+        except Exception as e:  # one bad turn must not end the session
+            del messages[turn_start:]  # drop the failed turn from the history
+            log.debug("turn failed error=%s", type(e).__name__)
+            why = str(e) if isinstance(e, LLMUnavailableError) else f"{type(e).__name__}: {e}"
+            print(f"\n[error] This turn failed and was dropped: {why}\n"
+                  "  The session continues; try again or type 'exit'.\n", file=sys.stderr)
+            continue
         print(f"\n\nAI:\n{reply}\n")
 
 
