@@ -195,7 +195,12 @@ class Round3MutationPins(SandboxCase):
 class Round3JudgePins(support.GuardedTestCase):
     def test_zero_passed_is_not_a_pass(self) -> None:
         self.assertEqual(tester.judge("pytest", 0, "0 passed, 3 skipped in 0.1s")[0], "fail")
-        self.assertEqual(tester.judge("pytest", 0, "10 passed in 0.1s")[0], "pass")
+        three_skipped = {"tests": 3, "failures": 0, "errors": 0, "skipped": 3}
+        ten = {"tests": 10, "failures": 0, "errors": 0, "skipped": 0}
+        self.assertEqual(tester.judge("pytest", 0, "", three_skipped)[0], "fail")
+        self.assertEqual(tester.judge("pytest", 0, "10 passed in 0.1s", ten)[0], "pass")
+        # LAI-E3: the console text alone is never a pytest pass.
+        self.assertEqual(tester.judge("pytest", 0, "10 passed in 0.1s")[0], "fail")
 
     def test_the_last_unittest_skip_count_is_the_summary(self) -> None:
         output = "a test printed (skipped=1)\nsss\nRan 3 tests in 0.0s\n\nOK (skipped=3)\n"

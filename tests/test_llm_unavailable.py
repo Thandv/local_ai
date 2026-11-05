@@ -91,7 +91,8 @@ class ClaudeBackendTests(support.GuardedTestCase):
 
 
 class EntryPointTests(support.GuardedTestCase):
-    """Each CLI main() exits 1 with the message when the backend is unavailable."""
+    """build-app exits 1 with the message when the backend is unavailable;
+    vibe and agent report it and keep the session."""
 
     def _assert_exits_1(self, main: Any, patch: Any) -> None:
         err = llm.LLMUnavailableError("invented: backend is down")
@@ -111,15 +112,38 @@ class EntryPointTests(support.GuardedTestCase):
             self._assert_exits_1(build_cli.main,
                                  lambda **kw: mock.patch.object(build_cli.orchestrator, "run", **kw))
 
+    def _assert_turn_fails_and_session_continues(self, main: Any, patch: Any) -> None:
+        """LAI-E3: in the REPLs an unavailable backend fails that turn only;
+        the reason goes to stderr and the session goes on to the next prompt."""
+        err = llm.LLMUnavailableError("invented: backend is down")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch(side_effect=err) as run_agent, \
+                mock.patch("builtins.input", side_effect=["build a thing", "again", "exit"]), \
+                contextlib.redirect_stdout(stdout), \
+                contextlib.redirect_stderr(stderr):
+            main()  # no SystemExit
+        self.assertEqual(run_agent.call_count, 2)
+        self.assertEqual(stderr.getvalue().count("invented: backend is down"), 2)
+        self.assertIn("Bye!", stdout.getvalue())
+
     def test_vibe(self) -> None:
         with mock.patch("sys.argv", ["vibe"]), \
                 mock.patch.object(vibe, "REPOS_DIR", vibe.Path("/nonexistent-invented")), \
                 mock.patch.object(vibe.glob_module, "glob", return_value=[]):
-            self._assert_exits_1(vibe.main,
-                                 lambda **kw: mock.patch.object(vibe, "run_agent", **kw))
+            self._assert_turn_fails_and_session_continues(
+                vibe.main, lambda **kw: mock.patch.object(vibe, "run_agent", **kw))
 
     def test_agent(self) -> None:
         with mock.patch("sys.argv", ["ai"]), \
                 mock.patch.object(agent.glob_module, "glob", return_value=[]):
-            self._assert_exits_1(agent.main,
-                                 lambda **kw: mock.patch.object(agent, "run_agent", **kw))
+            self._assert_turn_fails_and_session_continues(
+                agent.main, lambda **kw: mock.patch.object(agent, "run_agent", **kw))
+
+    def test_repl_mains_still_exit_1_for_an_unavailable_backend_outside_a_turn(self) -> None:
+        for module, argv0 in ((vibe, "vibe"), (agent, "ai")):
+            with self.subTest(repl=argv0), mock.patch("sys.argv", [argv0]):
+                err = llm.LLMUnavailableError("invented: backend is down")
+                with mock.patch.object(module, "_main", side_effect=err), \
+                        self.assertRaises(SystemExit) as cm:
+                    module.main()
+                self.assertEqual(cm.exception.code, "invented: backend is down")

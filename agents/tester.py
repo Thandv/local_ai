@@ -9,7 +9,10 @@ model's report.
 import json
 import os
 import re
+import shlex
 import stat
+import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Optional
 
@@ -60,7 +63,21 @@ _SKIP_DIRS = {".git", VENV_DIR, "venv", "node_modules", "__pycache__", ".pytest_
 _NO_TESTS = re.compile(r"\bno tests (ran|found|collected)\b|(?<![\d.])0 tests?\b", re.IGNORECASE)
 _UNITTEST_RAN = re.compile(r"^Ran (\d+) tests? in ", re.MULTILINE)
 _UNITTEST_SKIPPED = re.compile(r"\bskipped=(\d+)")
-_PYTEST_PASSED = re.compile(r"\b[1-9]\d* passed\b")
+# npm test runners' own summary lines (jest, vitest, mocha, ava, node --test
+# in tap or spec form). The last one in the output is the runner's.
+_NPM_PASSED = re.compile(
+    r"^(?:Tests:\s.*?\b(\d+) passed\b.*\b\d+ total"     # jest
+    r"|\s*Tests\s.*?\b(\d+) passed\b.*\(\d+\)"         # vitest
+    r"|\s*(\d+) passing\b"                                # mocha
+    r"|\s*(\d+) tests? passed\b"                          # ava
+    r"|(?:#|\u2139) pass (\d+)\s*$)", re.MULTILINE)        # node --test (tap / spec)
+_NPM_FAILED = re.compile(
+    r"^(?:Tests:\s.*?\b[1-9]\d* failed\b"
+    r"|\s*Tests\s.*?\b[1-9]\d* failed\b"
+    r"|\s*[1-9]\d* failing\b"
+    r"|\s*[1-9]\d* tests? failed\b"
+    r"|(?:#|\u2139) fail [1-9]\d*\s*$)", re.MULTILINE)
+JUNIT_LIMIT = 5_000_000
 _PYTEST_IMPORT = re.compile(r"^\s*(import pytest\b|from pytest\b)", re.MULTILINE)
 
 
@@ -135,16 +152,77 @@ def detect_test_command(out: Path) -> dict:
                  and not (tests / "__init__.py").exists() else [])
         return {"runner": "unittest",
                 "argv": [str(python), "-m", "unittest", "discover", *start]}
-    if _npm_test_script(out):
-        return {"runner": "npm", "argv": ["npm", "test"]}
+    script = _npm_test_script(out)
+    if script:
+        return {"runner": "npm", "argv": ["npm", "test"], "script": script}
     return {"runner": None, "status": "fail", "reason": "no tests found"}
 
 
-def judge(runner: str, returncode: int, output: str) -> tuple[str, str]:
-    """(status, reason) for a test command that ran. pytest passes only on
-    exit 0 with at least one 'N passed' (5 = nothing collected); unittest only
-    on exit 0 with 'Ran N tests', N >= 1, not all skipped; npm on exit 0 (its
-    output is not parsed beyond 'no tests')."""
+def junit_counts(path: str) -> Optional[dict]:
+    """{tests, failures, errors, skipped} summed over the JUnit XML report
+    pytest wrote, or None when there is no readable report."""
+    text = _read_plain(Path(path), JUNIT_LIMIT)
+    if not text:
+        return None
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return None
+    suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+    if root.tag not in ("testsuite", "testsuites") or not suites:
+        return None
+    counts = dict.fromkeys(("tests", "failures", "errors", "skipped"), 0)
+    for suite in suites:
+        for key in counts:
+            value = suite.get(key, "0")
+            if not value.isdigit():
+                return None
+            counts[key] += int(value)
+    return counts
+
+
+def _judge_pytest(report: Optional[dict]) -> tuple[str, str]:
+    if report is None:
+        return "fail", ("pytest wrote no JUnit report (the run ended before its summary; "
+                        "a conftest or plugin may have exited)")
+    bad = report["failures"] + report["errors"]
+    passed = report["tests"] - report["skipped"] - bad
+    if bad:
+        return "fail", f"{report['failures']} failed, {report['errors']} error(s)"
+    if passed < 1:
+        return "fail", f"no test passed ({report['tests']} collected, {report['skipped']} skipped)"
+    return "pass", f"{passed} passed"
+
+
+def _judge_npm(script: str, output: str) -> tuple[str, str]:
+    try:
+        words = shlex.split(script)
+    except ValueError:
+        words = []
+    if words[:1] == ["node"] and "--test" not in words:
+        return "unverified", ("npm test runs a plain node script, whose output is its own: "
+                              "there is no runner count to check")
+    if _NPM_FAILED.search(output):
+        return "fail", "the test runner reported failures"
+    passed = [next(g for g in m.groups() if g) for m in _NPM_PASSED.finditer(output)]
+    if not passed:
+        return "unverified", "npm test exited 0 but printed no test count the gate can read"
+    if int(passed[-1]) < 1:
+        return "fail", "the test command ran no tests"
+    return "pass", f"{passed[-1]} passed"
+
+
+def judge(runner: str, returncode: int, output: str, report: Optional[dict] = None,
+          script: str = "") -> tuple[str, str]:
+    """(status, reason) for a test command that ran.
+
+    pytest: exit 0 and, in the JUnit report the gate asked for (`report`,
+    from junit_counts), at least one passed test and no failure or error; the
+    console output is not read, so a printed summary line counts for nothing.
+    unittest: exit 0 with 'Ran N tests', N >= 1, not all skipped.
+    npm (`script` is package.json's test script): exit 0 and a test runner's
+    own count of N >= 1 passed; no count, or a plain `node <file>` script,
+    is "unverified" (the verdict UNVERIFIED), never "pass"."""
     if runner == "unittest":
         ran = _UNITTEST_RAN.findall(output)
         count = int(ran[-1]) if ran else 0
@@ -160,26 +238,37 @@ def judge(runner: str, returncode: int, output: str) -> tuple[str, str]:
         return "fail", "pytest collected no tests"
     if returncode != 0:
         return "fail", f"{runner} exited {returncode}"
+    if runner == "pytest":
+        return _judge_pytest(report)
     if _NO_TESTS.search(output):
         return "fail", "the test command ran no tests"
-    if runner == "pytest" and not _PYTEST_PASSED.search(output):
-        return "fail", "pytest reported no passed tests (all skipped?)"
-    return "pass", ""
+    if runner == "npm":
+        return _judge_npm(script, output)
+    return "fail", f"no way to verify {runner}'s result"
 
 
 def run_test_gate(project: Project) -> dict:
     """Run the detected test command through the LA-3 guard's run_argv (a
     fixed argv, no shell, its normal allowlist and confirmation) and return
-    the project's test_results dict."""
+    the project's test_results dict. A pytest run writes its JUnit report
+    into a fresh temp dir outside the build, read before the dir is removed."""
     found = detect_test_command(project.output_dir)
     runner = found.get("runner")
     if "argv" not in found:
         return {"status": found["status"], "runner": runner, "returncode": None,
                 "reason": found["reason"], "output_tail": ""}
-    outcome = guard.run_argv(found["argv"])
+    report = None
+    with tempfile.TemporaryDirectory(prefix="local_ai-gate-") as tmp:
+        if runner == "pytest":
+            path = os.path.join(os.path.realpath(tmp), "junit.xml")
+            outcome = guard.run_argv(found["argv"], pytest_report=path)
+            report = junit_counts(path)
+        else:
+            outcome = guard.run_argv(found["argv"])
     tail = outcome.output[-OUTPUT_TAIL:]
     if outcome.ran:
-        status, reason = judge(runner, outcome.returncode, outcome.output)
+        status, reason = judge(runner, outcome.returncode, outcome.output, report,
+                               found.get("script", ""))
     elif outcome.status == "timeout":
         status, reason = "fail", outcome.reason
     else:  # refused, no TTY, declined, could not start

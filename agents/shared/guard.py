@@ -446,13 +446,24 @@ _PYTEST_FLAGS = {"-q", "-qq", "-v", "-vv", "-vvv", "-x", "-s", "-l", "-ra", "-rA
 _PYTEST_VALUE_PREFIXES = ("--tb=", "--maxfail=", "--color=", "--durations=")
 
 
-def _pytest_pinned(sandbox: Sandbox) -> list:
+def _pytest_pinned(sandbox: Sandbox, report: Optional[str] = None) -> list:
     """Options forced on every allowlisted pytest run. pytest.ini/pyproject
     addopts are model-written and come before the command line, so these
     override an addopts --basetemp (which pytest empties) and keep the cache
-    from writing outside the root."""
-    return [f"--basetemp={os.path.join(str(sandbox.root), '.pytest_tmp')}",
-            "-p", "no:cacheprovider"]
+    from writing outside the root.
+
+    With `report` (the test gate's run), every model-written pytest config is
+    ignored too: `-c /dev/null` with an explicit rootdir (so pytest.ini,
+    pyproject.toml, setup.cfg and tox.ini are not read: no addopts, -s, --co,
+    -k/-m filters or testpaths), `-o addopts=` on top, and a JUnit XML report
+    written to `report`, outside the root, which the gate reads instead of
+    the console output."""
+    pinned = [f"--basetemp={os.path.join(str(sandbox.root), '.pytest_tmp')}",
+              "-p", "no:cacheprovider"]
+    if report is not None:
+        pinned += ["-c", os.devnull, f"--rootdir={sandbox.root}", "-o", "addopts=",
+                   f"--junitxml={report}"]
+    return pinned
 
 
 def _pytest_args_ok(sandbox: Sandbox, cwd: str, args: Sequence[str]) -> bool:
@@ -910,7 +921,7 @@ def _venv_program(sandbox: Sandbox, cwd: str, prog: str) -> Optional[str]:
     return None
 
 
-def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
+def _plan(sandbox: Sandbox, cwd: str, argv: list, report: Optional[str] = None) -> _Plan:
     prog, args = argv[0], argv[1:]
     forced = None  # an explicit ROOT/.venv/bin/<name> runs exactly that file
     if "/" in prog:
@@ -945,7 +956,7 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
                 return _Plan([base, "-m", "venv", os.path.join(str(sandbox.root), VENV_DIR)])
             python = exe(prog)
             if module == "pytest" and _pytest_args_ok(sandbox, cwd, margs):
-                return _Plan([python, "-m", "pytest", *_pytest_pinned(sandbox), *margs])
+                return _Plan([python, "-m", "pytest", *_pytest_pinned(sandbox, report), *margs])
             if module == "unittest" and _unittest_args_ok(sandbox, cwd, margs):
                 return _Plan([python, "-m", "unittest", *margs])
             if module == "py_compile" and margs and all(
@@ -958,7 +969,7 @@ def _plan(sandbox: Sandbox, cwd: str, argv: list) -> _Plan:
         return _pip_plan(sandbox, cwd, args)
     if prog == "pytest":
         if _pytest_args_ok(sandbox, cwd, args):
-            return _Plan([exe("pytest"), *_pytest_pinned(sandbox), *args])
+            return _Plan([exe("pytest"), *_pytest_pinned(sandbox, report), *args])
         return _Plan([exe("pytest"), *args],
                      confirm="these pytest options are not on the allowlist")
     if prog == "npm":
@@ -1039,15 +1050,23 @@ def _empty_dir_outside(sandbox: Sandbox, stack: contextlib.ExitStack) -> Optiona
     return None
 
 
-def run_argv(argv: Sequence[str], working_dir: Optional[str] = None) -> Outcome:
+def run_argv(argv: Sequence[str], working_dir: Optional[str] = None, *,
+             pytest_report: Optional[str] = None) -> Outcome:
     """Run a command through the guard. Never raises for policy reasons:
-    a refused, unconfirmed or failed command comes back as an Outcome."""
+    a refused, unconfirmed or failed command comes back as an Outcome.
+
+    `pytest_report` is for the test gate only (never a model argument): an
+    allowlisted pytest run then ignores model-written config and writes a
+    JUnit XML report to that path, which must be outside the root."""
     shown = tuple(argv) if isinstance(argv, (list, tuple)) else (argv,)
     try:
         sandbox = current()
+        if pytest_report is not None and is_inside(
+                sandbox, os.path.realpath(os.path.dirname(pytest_report))):
+            raise Refused("the test gate's pytest report must be written outside the build")
         argv = _check_argv(argv)
         cwd = resolve_dir(sandbox, working_dir)
-        plan = _plan(sandbox, cwd, argv)
+        plan = _plan(sandbox, cwd, argv, pytest_report)
     except Refused as e:
         return Outcome("refused", shown, reason=str(e))
     if plan.confirm and not sandbox.yes_unsafe:
