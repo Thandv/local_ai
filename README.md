@@ -99,7 +99,9 @@ Every file and command tool goes through one guard, `agents/shared/guard.py`
   read elsewhere (`pytest --basetemp`, `git -c`, `git diff --output`,
   `node -e`, `python -c`, ...) are not on it. Every allowlisted pytest run also gets
   `--basetemp=ROOT/.pytest_tmp -p no:cacheprovider`, so `addopts` in a
-  model-written `pytest.ini` cannot point those outside the root.
+  model-written `pytest.ini` cannot point those outside the root (the test
+  gate's own run ignores model-written pytest config entirely; see
+  [Build verdict](#build-verdict)).
 - **Confirmation.** Anything else is shown to you with a `y/N` prompt when
   stdin is a TTY, and refused when it is not. `--yes-unsafe` on the
   `build-app`, `vibe` or `agent` command line skips that prompt; the model
@@ -159,7 +161,7 @@ decides it:
 | Verdict      | Meaning |
 |--------------|---------|
 | `SUCCESS`    | `PLAN.md` exists; there are at least 2 source files with at least 30 lines between them (docs, `node_modules`, venvs and build dirs do not count); and the test gate passed. |
-| `UNVERIFIED` | Every other gate passed, but the tests were not run: no TTY to confirm the test command, the person declined it, no build venv, or pytest/npm missing. |
+| `UNVERIFIED` | Every other gate passed, but the tests were not run (no TTY to confirm the test command, the person declined it, no build venv, or pytest/npm missing), or `npm test` ran with no test count to check. |
 | `INCOMPLETE` | The pipeline ran, but one of those gates did not pass (including tests that ran and failed, or no tests found). |
 | `FAILED`     | A required stage (Architect, Coder or Tester) raised, or any stage hit `LLMUnavailableError`. The pipeline stops there and no later stage runs. |
 
@@ -174,7 +176,7 @@ it.
 Tester stage (`run_test_gate` in `agents/tester.py`) runs the project's test
 command itself, as a fixed argv through the guard, and reads its exit code;
 the model's own report is not used. It records `test_results` (`status`
-pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
+pass/fail/skipped/unverified, `runner`, `returncode`, `reason`, `output_tail`) in
 `BUILD_LOG.json` and prints a `Tests` line in the summary.
 
 - Python tests (`test*.py` or `*_test.py` files) run with the build
@@ -185,11 +187,24 @@ pass/fail/skipped, `runner`, `returncode`, `reason`, `output_tail`) in
 - Otherwise `npm test`, when package.json has a `test` script that is not
   npm's "no test specified" stub. It needs a confirmation unless the script is
   a plain test-runner command (see [Safety](#safety)).
-- pytest passes only on exit 0 with at least one `N passed` (exit 5, nothing
-  collected, fails). unittest passes only on exit 0 with `Ran N tests`,
-  N >= 1, not all of them skipped. **`npm test` passes on
-  exit 0 without counting tests**; only output that says no tests ran (for
-  example `0 tests`) fails it.
+- pytest is judged from a JUnit XML report the gate asks for
+  (`--junitxml=` into a fresh temp dir outside the build), never from the
+  console output: it passes only on exit 0 with at least one passed test and
+  no failure or error in that report. A missing or unreadable report fails.
+  The gate's pytest run also ignores every model-written pytest config
+  (`-c /dev/null --rootdir=<build> -o addopts=`), so `pytest.ini`,
+  `pyproject.toml`, `setup.cfg` and `tox.ini` cannot add `-s`, `--co`, `-k`
+  or `-m` to it. unittest passes only on exit 0 with `Ran N tests`, N >= 1,
+  not all of them skipped.
+- `npm test` passes only on exit 0 with the test runner's own count of
+  N >= 1 passed tests (the last jest, vitest, mocha, ava or `node --test`
+  summary in the output) and no reported failure. Exit 0 with no count, or a
+  `test` script that is a plain `node <file>` (whose output is its own), is
+  `unverified`, which gives `UNVERIFIED`, never `SUCCESS`.
+- Limit: `conftest.py`, test modules and pytest plugins are model code that
+  runs inside pytest. They can rewrite pytest's own results (for example a
+  hook that marks failures as passed); the gate stops config- and
+  output-based fooling, not hostile code in the test process.
 - No test command found is a fail ("no tests found"). A failing gate gives
   the model up to 3 fix attempts, each followed by a new run of the gate.
 - No TTY, a declined confirmation, a refusal or a missing venv/pytest/npm
@@ -204,6 +219,9 @@ bash scripts/test.sh
 Runs the stdlib `unittest` suite in `tests/` (Python 3.11+). It needs no network, no Ollama
 and no model: `tests/support.py` replaces `urllib.request.urlopen`,
 `subprocess.run`, `subprocess.Popen` and `socket.create_connection` with
-stubs that raise, and every test fails if any of them was called. Tests write
-only to temporary directories. Extra arguments are passed to `unittest`
+stubs that raise, and every test fails if any of them was called. The one
+exception is `tests/test_gate_fooling.py`, which runs a real local pytest
+through the test gate, as an attacker-shaped build would (it lets
+`subprocess` through for that run only, and is skipped when no local Python
+has pytest installed). Tests write only to temporary directories. Extra arguments are passed to `unittest`
 (e.g. `bash scripts/test.sh -v`, or `-k resume` to run matching tests).

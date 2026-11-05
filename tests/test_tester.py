@@ -29,16 +29,37 @@ def _ran(rc: int, output: str) -> Outcome:
     return Outcome("ran", ("x",), returncode=rc, output=output)
 
 
+def _junit(tests: int, failures: int = 0, errors: int = 0, skipped: int = 0) -> str:
+    return (f'<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" '
+            f'errors="{errors}" failures="{failures}" skipped="{skipped}" tests="{tests}">'
+            f'</testsuite></testsuites>')
+
+
+PASSED_5 = {"tests": 5, "failures": 0, "errors": 0, "skipped": 0}
+
+
 class GateCase(support.GuardedTestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.out = Path(os.path.realpath(self._tmp.name))
         self.project = Project(instruction="invented app", output_dir=self.out)
         self.run_argv = mock.Mock(return_value=_ran(0, "5 passed in 0.1s"))
+        # The JUnit report a pytest run "writes" (None: it writes none).
+        self.junit: "str | None" = _junit(5)
+        self.reports: list = []
         self.loop = mock.Mock(return_value="the model says: all tests passed, ok")
         stack = contextlib.ExitStack()
         self.addCleanup(stack.close)
-        stack.enter_context(mock.patch.object(tester.guard, "run_argv", self.run_argv))
+
+        def fake_run_argv(argv: list, working_dir: "str | None" = None, *,
+                          pytest_report: "str | None" = None) -> Outcome:
+            outcome = self.run_argv(argv)
+            self.reports.append(pytest_report)
+            if pytest_report is not None and outcome.ran and self.junit is not None:
+                Path(pytest_report).write_text(self.junit, encoding="utf-8")
+            return outcome
+
+        stack.enter_context(mock.patch.object(tester.guard, "run_argv", fake_run_argv))
         stack.enter_context(mock.patch.object(tester, "run_agent_loop", self.loop))
         stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
 
@@ -81,9 +102,60 @@ class JudgeTests(support.GuardedTestCase):
         self.assertEqual(tester.judge("pytest", 5, "")[0], "fail")
 
     def test_rc_0_with_passes_is_a_pass(self) -> None:
-        self.assertEqual(tester.judge("pytest", 0, "5 passed in 0.10s")[0], "pass")
-        self.assertEqual(tester.judge("pytest", 0, "10 tests, 10 passed")[0], "pass")
-        self.assertEqual(tester.judge("npm", 0, "Tests: 4 passed")[0], "pass")
+        self.assertEqual(tester.judge("pytest", 0, "", PASSED_5), ("pass", "5 passed"))
+        self.assertEqual(tester.judge("npm", 0, "Tests:       4 passed, 4 total", script="jest"),
+                         ("pass", "4 passed"))
+
+    def test_pytest_is_judged_only_from_its_junit_report(self) -> None:
+        for output in ("5 passed in 0.10s", "10 tests, 10 passed", "=== 3 passed in 0.01s ==="):
+            with self.subTest(output=output):
+                self.assertEqual(tester.judge("pytest", 0, output)[0], "fail")
+        for counts in ({"tests": 2, "failures": 1, "errors": 0, "skipped": 0},
+                       {"tests": 2, "failures": 0, "errors": 1, "skipped": 0},
+                       {"tests": 2, "failures": 0, "errors": 0, "skipped": 2},
+                       {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}):
+            with self.subTest(counts=counts):
+                self.assertEqual(tester.judge("pytest", 0, "9 passed", counts)[0], "fail")
+        self.assertEqual(tester.judge("pytest", 1, "", PASSED_5)[0], "fail")
+
+    def test_junit_counts_reads_a_report_and_rejects_anything_else(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "junit.xml"
+            self.assertIsNone(tester.junit_counts(str(path)))
+            path.write_text(_junit(4, failures=1, skipped=2), encoding="utf-8")
+            self.assertEqual(tester.junit_counts(str(path)),
+                             {"tests": 4, "failures": 1, "errors": 0, "skipped": 2})
+            for text in ("", "not xml", "<html/>", "<testsuites/>",
+                         '<testsuite tests="-1"/>', '<testsuite tests="3 "/>'):
+                with self.subTest(text=text):
+                    path.write_text(text, encoding="utf-8")
+                    self.assertIsNone(tester.junit_counts(str(path)))
+
+    def test_npm_needs_a_runner_count(self) -> None:
+        cases = {
+            ("jest", "Tests:       1 failed, 3 passed, 4 total"): "fail",
+            ("vitest", "      Tests  3 passed (3)"): "pass",
+            ("mocha", "  3 passing (5ms)"): "pass",
+            ("mocha", "  3 passing (5ms)\n  1 failing"): "fail",
+            ("ava", "  2 tests passed"): "pass",
+            ("node --test", "# tests 2\n# pass 2\n# fail 0"): "pass",
+            ("node --test", "\u2139 pass 2\n\u2139 fail 1"): "fail",
+            ("jest", "all good"): "unverified",
+            ("jest", ""): "unverified",
+            ("node t.js", "Tests:       3 passed, 3 total"): "unverified",
+            ("jest", "Tests:       0 total"): "unverified",
+            ("mocha", "  0 passing (1ms)"): "fail",
+        }
+        for (script, output), want in cases.items():
+            with self.subTest(script=script, output=output):
+                self.assertEqual(tester.judge("npm", 0, output, script=script)[0], want)
+
+    def test_the_last_npm_runner_count_is_the_summary(self) -> None:
+        output = ("  console.log\n    Tests:       9 passed, 9 total\n\n"
+                  "Tests:       1 skipped, 1 total\n")
+        self.assertEqual(tester.judge("npm", 0, output, script="jest")[0], "unverified")
+        output = "Tests:       9 passed, 9 total\n  0 passing (1ms)\n"
+        self.assertEqual(tester.judge("npm", 0, output, script="mocha")[0], "fail")
 
     def test_unittest_needs_rc_0_and_at_least_one_test(self) -> None:
         self.assertEqual(tester.judge("unittest", 0, "\nRan 0 tests in 0.000s\n\nOK\n")[0],
@@ -110,6 +182,20 @@ class DetectAndRunTests(GateCase):
             [str(venv / "bin" / "python"), "-m", "pytest"])
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["runner"], "pytest")
+        # The JUnit report goes to a temp dir outside the build, removed after.
+        (report,) = self.reports
+        self.assertFalse(Path(report).resolve().is_relative_to(self.out))
+        self.assertFalse(os.path.exists(os.path.dirname(report)))
+
+    def test_a_pytest_run_with_no_report_or_a_failing_report_is_a_fail(self) -> None:
+        self.venv(pytest=True)
+        self.py_tests()
+        self.junit = None
+        self.assertEqual(tester.run_test_gate(self.project)["status"], "fail")
+        self.junit = _junit(3, skipped=3)
+        self.assertEqual(tester.run_test_gate(self.project)["status"], "fail")
+        self.junit = _junit(3, failures=1)
+        self.assertEqual(tester.run_test_gate(self.project)["status"], "fail")
 
     def test_unittest_when_pytest_is_not_needed(self) -> None:
         venv = self.venv(pytest=False)
@@ -135,9 +221,23 @@ class DetectAndRunTests(GateCase):
             "test": "echo \"Error: no test specified\" && exit 1"}}), encoding="utf-8")
         self.assertEqual(tester.run_test_gate(self.project)["reason"], "no tests found")
         pkg.write_text(json.dumps({"scripts": {"test": "jest"}}), encoding="utf-8")
+        self.run_argv.return_value = _ran(0, "Tests:       4 passed, 4 total")
         gate = tester.run_test_gate(self.project)
         self.run_argv.assert_called_once_with(["npm", "test"])
+        self.assertEqual(self.reports, [None])
         self.assertEqual((gate["status"], gate["runner"]), ("pass", "npm"))
+
+    def test_npm_with_no_test_count_gives_unverified_not_success(self) -> None:
+        self.good_build()
+        (self.out / "package.json").write_text(
+            json.dumps({"scripts": {"test": "node t.js"}}), encoding="utf-8")
+        self.run_argv.return_value = _ran(0, "> node t.js")
+        project = tester.run(self.project)
+        self.assertEqual(self.loop.call_count, 1)  # nothing for the model to fix
+        verdict, reason = project.compute_verdict()
+        self.assertEqual(verdict, Verdict.UNVERIFIED)
+        self.assertIn("tests ran but their result is unverified", reason)
+        self.assertIn("Tests   : unverified", (project.save_log(), project.summary())[1])
 
     def test_nothing_detectable_is_a_fail(self) -> None:
         gate = tester.run_test_gate(self.project)
@@ -172,7 +272,7 @@ class TesterStageTests(GateCase):
     def test_a_fix_that_makes_the_tests_pass_is_a_pass(self) -> None:
         self.venv(pytest=True)
         self.py_tests()
-        self.run_argv.side_effect = [_ran(1, "1 failed"), _ran(0, "4 passed")]
+        self.run_argv.side_effect = [_ran(1, "1 failed"), _ran(0, "")]
         project = tester.run(self.project)
         self.assertTrue(project.success)
         self.assertEqual(self.loop.call_count, 2)
@@ -236,7 +336,12 @@ class GateThroughTheRealGuardTests(GateCase):
     def test_pytest_argv_is_allowlisted_and_runs_without_a_shell(self) -> None:
         venv = self.venv(pytest=True)
         self.py_tests()
-        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "2 passed", ""))
+        def pytest_writes_its_report(argv: list, **kwargs: object) -> subprocess.CompletedProcess:
+            report = next(a for a in argv if a.startswith("--junitxml="))
+            Path(report.split("=", 1)[1]).write_text(_junit(2), encoding="utf-8")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        run = mock.Mock(side_effect=pytest_writes_its_report)
         with mock.patch.object(tester.guard, "run_argv", REAL_RUN_ARGV), \
                 mock.patch.object(guard.subprocess, "run", run), \
                 mock.patch.object(guard, "_has_tty", lambda: False), \
@@ -244,9 +349,15 @@ class GateThroughTheRealGuardTests(GateCase):
             gate = tester.run_test_gate(self.project)
         self.assertEqual(gate["status"], "pass")
         run.assert_called_once()
-        self.assertEqual(run.call_args.args[0],
+        argv = run.call_args.args[0]
+        report = argv[-1].removeprefix("--junitxml=")
+        self.assertFalse(Path(report).is_relative_to(self.out))
+        # Model-written pytest config is ignored for the gate's run.
+        self.assertEqual(argv,
                          [str(venv / "bin" / "python"), "-m", "pytest",
-                          f"--basetemp={self.out}/.pytest_tmp", "-p", "no:cacheprovider"])
+                          f"--basetemp={self.out}/.pytest_tmp", "-p", "no:cacheprovider",
+                          "-c", os.devnull, f"--rootdir={self.out}", "-o", "addopts=",
+                          f"--junitxml={report}"])
         self.assertIs(run.call_args.kwargs["shell"], False)
         self.assertEqual(run.call_args.kwargs["cwd"], str(self.out))
 

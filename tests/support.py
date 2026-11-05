@@ -11,12 +11,13 @@ Every test case derives from GuardedTestCase, whose tearDown fails the test
 if any guarded call has been recorded so far in the run.
 """
 
+import contextlib
 import socket
 import subprocess
 import sys
 import unittest
 import urllib.request
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 class GuardViolation(BaseException):
@@ -24,6 +25,11 @@ class GuardViolation(BaseException):
 
 
 CALLS: list[str] = []
+
+# The real callables, saved before install() replaces them. Only tests that
+# deliberately run a local program (the real-pytest gate tests) or a local
+# stub server on 127.0.0.1 use these, and only inside an explicit patch.
+REAL: dict[str, Any] = {}
 
 GUARDED: dict[str, tuple[Any, str]] = {
     "urllib.request.urlopen":   (urllib.request, "urlopen"),
@@ -45,7 +51,19 @@ def install() -> None:
     """Replace every guarded callable with a recording stub (idempotent)."""
     for name, (module, attr) in GUARDED.items():
         if getattr(getattr(module, attr), "guard_name", None) != name:
+            REAL[name] = getattr(module, attr)
             setattr(module, attr, _make_stub(name))
+
+
+@contextlib.contextmanager
+def real_subprocess() -> Iterator[None]:
+    """Let subprocess.run/Popen through for one block (local programs only)."""
+    saved = (subprocess.run, subprocess.Popen)
+    subprocess.run, subprocess.Popen = REAL["subprocess.run"], REAL["subprocess.Popen"]
+    try:
+        yield
+    finally:
+        subprocess.run, subprocess.Popen = saved
 
 
 def is_installed() -> bool:

@@ -61,7 +61,7 @@ class Project:
     plan:          str = ""       # Architect agent plan (also written to PLAN.md)
     files_written: list = field(default_factory=list)  # Paths written by all agents
     debug_log:     str = ""       # Debugger agent output
-    # Tester gate: {status: pass|fail|skipped, runner, returncode, reason,
+    # Tester gate: {status: pass|fail|skipped|unverified, runner, returncode, reason,
     # output_tail}, from the real exit code of the project's test command.
     test_results:  dict = field(default_factory=dict)
     audit:         str = ""       # Auditor agent output
@@ -146,16 +146,18 @@ class Project:
         })
 
     def test_status(self) -> str:
-        """The tester gate's status: pass, fail, skipped, or "" if it never ran."""
+        """The tester gate's status: pass, fail, skipped (not run), unverified
+        (ran, but with no result the gate can check), or "" if it never ran."""
         results = self.test_results if isinstance(self.test_results, dict) else {}
         status = results.get("status")
-        return status if status in ("pass", "fail", "skipped") else ""
+        return status if status in ("pass", "fail", "skipped", "unverified") else ""
 
     def compute_verdict(self) -> tuple[Verdict, str]:
         """The single verdict function: FAILED if a fatal stage error was
         recorded; else SUCCESS when compute_final_success() passes; UNVERIFIED
         when only the test gate is missing because the tests were skipped (no
-        TTY, a declined confirmation, no build venv or test tool); otherwise
+        TTY, a declined confirmation, no build venv or test tool) or ran with
+        no result the gate can check (status "unverified"); otherwise
         INCOMPLETE. Returns (verdict, reason); reason is empty on SUCCESS."""
         fatal = next((e for e in self.stage_errors if e["fatal"]), None)
         if fatal:
@@ -163,8 +165,10 @@ class Project:
         passed, reason = self.compute_final_success()
         if passed:
             return Verdict.SUCCESS, ""
-        if reason == TEST_GATE_FAILED and self.test_status() == "skipped":
+        if reason == TEST_GATE_FAILED and self.test_status() in ("skipped", "unverified"):
             why = self.test_results.get("reason") or "unknown"
+            if self.test_status() == "unverified":
+                return Verdict.UNVERIFIED, f"tests ran but their result is unverified: {why}"
             return Verdict.UNVERIFIED, f"tests were not run: {why}"
         return Verdict.INCOMPLETE, reason
 
