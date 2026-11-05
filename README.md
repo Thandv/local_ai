@@ -6,6 +6,8 @@ coding REPL that run on a local Ollama model (or the Claude API).
 **Status: prototype.** Read [Safety](#safety) before running it: the model can
 run commands on this machine. A guard limits which ones and where, but an
 allowlisted test runner still runs model-written code.
+What works, what is untested and what the owner still holds:
+[STATUS.md](STATUS.md).
 
 ## What it is
 
@@ -55,12 +57,30 @@ is otherwise swallowed. Secrets are redacted. Unset or `0` changes nothing.
 ## Install
 
 Packaging is defined in `pyproject.toml` (setuptools, no runtime
-dependencies). From the repo root, inside a virtualenv:
+dependencies). From the repo root, make a venv in `.venv` and install the
+package into it (editable, so the commands run this checkout):
 
 ```bash
-pip install -e .            # Ollama backend only
-pip install -e ".[claude]"  # also installs `anthropic` for the Claude API backend
+python3 -m venv --clear .venv
+.venv/bin/python -m pip install -e .            # Ollama backend only
+.venv/bin/python -m pip install -e ".[claude]"  # also installs `anthropic` for the Claude API backend
+.venv/bin/build-app --help                      # check: prints the options
 ```
+
+To run the commands from anywhere, link them into a directory on your
+`PATH` (here `~/.local/bin`). Use symlinks, not copies or wrapper scripts
+with a hard-coded path:
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf "$PWD/.venv/bin/build-app" ~/.local/bin/build-app
+ln -sf "$PWD/.venv/bin/vibe" ~/.local/bin/vibe
+ln -sf "$PWD/.venv/bin/ai-index" ~/.local/bin/ai-index
+```
+
+A venv records its own absolute path. If the checkout moves, the venv and
+the links break (`No module named local_ai` or `bad interpreter`): run both
+blocks again from the new location.
 
 The `[claude]` extra is optional and off by default. Either form installs
 three commands:
@@ -232,3 +252,7 @@ through the test gate, as an attacker-shaped build would (it lets
 `subprocess` through for that run only, and is skipped when no local Python
 has pytest installed). Tests write only to temporary directories. Extra arguments are passed to `unittest`
 (e.g. `bash scripts/test.sh -v`, or `-k resume` to run matching tests).
+`.github/workflows/test.yml` runs the same command plus
+`ruff check --select E9,F63,F7,F82 .` (syntax errors and undefined names)
+on every push. `tests/test_docs_truth.py` fails when README.md or
+STATUS.md names a command, repo file or module that does not exist.
